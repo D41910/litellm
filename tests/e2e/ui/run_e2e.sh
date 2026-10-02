@@ -177,11 +177,13 @@ cd "$DASHBOARD_DIR"
 npm install
 npm run build
 # Copy the fresh build to the proxy's static UI directory
-cp -r "$DASHBOARD_DIR/out/" "$REPO_ROOT/litellm/proxy/_experimental/out/"
+rm -rf "$REPO_ROOT/litellm-proxy-extras/litellm_proxy_extras/ui"
+mkdir -p "$REPO_ROOT/litellm-proxy-extras/litellm_proxy_extras/ui"
+cp -r "$DASHBOARD_DIR/out/." "$REPO_ROOT/litellm-proxy-extras/litellm_proxy_extras/ui/"
 
 # Restructure HTML files so extensionless routes work (e.g. /ui/login)
 # Next.js export produces login.html; the proxy expects login/index.html
-find "$REPO_ROOT/litellm/proxy/_experimental/out" -name '*.html' ! -name 'index.html' | while read -r htmlfile; do
+find "$REPO_ROOT/litellm-proxy-extras/litellm_proxy_extras/ui" -name '*.html' ! -name 'index.html' | while read -r htmlfile; do
   target_dir="${htmlfile%.html}"
   target_path="$target_dir/index.html"
   mkdir -p "$target_dir"

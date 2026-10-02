@@ -28,6 +28,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from importlib.resources import files as package_files
 from itertools import chain
 from types import MappingProxyType, UnionType
 from typing import (
@@ -2133,7 +2134,7 @@ origins, allow_cors_credentials = _get_cors_config()
 # get current directory
 try:
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    packaged_ui_path: Final = os.path.join(current_dir, "_experimental", "out")
+    packaged_ui_path: Final = str(package_files("litellm_proxy_extras").joinpath("ui"))
     ui_path = packaged_ui_path
     litellm_asset_prefix: Final = "/litellm-asset-prefix"
 

@@ -2,6 +2,12 @@
 
 This runbook covers building and publishing a new version of the `litellm-proxy-extras` PyPI package. For use by litellm engineers only.
 
+## Dashboard assets
+
+Before building, run `./build_ui.sh` from `ui/litellm-dashboard` with the pinned Node environment. It writes the dashboard into `litellm-proxy-extras/litellm_proxy_extras/ui/`
+
+Check that the extras wheel contains `ui/index.html` and `ui/_next/`, and that the core LiteLLM wheel contains no dashboard assets. Publish the matching extras version before releasing the core SDK that pins it. Validate a fresh `litellm[proxy]` installation against both built wheels before publication
+
 ## Prerequisites
 
 - All `schema.prisma` files are in sync (see [migration_runbook.md](./migration_runbook.md) Step 0)

@@ -10,10 +10,14 @@ import argparse
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 import traceback
 from collections.abc import Callable
 from functools import partial
+from importlib.metadata import distribution
+from importlib.resources import files
+from pathlib import Path
 from typing import Final
 
 EXTRAS_ONLY_MODULES = ("fastapi", "uvicorn", "keyring", "mcp", "mcp_types", "httpx2", "httpcore2")
@@ -30,6 +34,48 @@ def check_optional_dependencies(profile: str) -> str:
             present: Final = importlib.util.find_spec(name) is not None
             _require(present == expected, f"{name}: installed={present}, expected={expected} for {profile}")
     return f"optional dependencies match {profile}"
+
+
+def check_ui_packaging(profile: str) -> str:
+    sdk_files: Final = distribution("litellm").files or ()
+    bundled_ui: Final = tuple(
+        str(path) for path in sdk_files if str(path).startswith("litellm/proxy/_experimental/out/")
+    )
+    _require(not bundled_ui, "core SDK still bundles dashboard assets")
+    has_proxy_extras: Final = importlib.util.find_spec("litellm_proxy_extras") is not None
+    _require(has_proxy_extras == (profile == "proxy"), f"unexpected proxy extras installation for {profile}")
+    if profile == "proxy":
+        ui: Final = files("litellm_proxy_extras").joinpath("ui")
+        _require(ui.joinpath("index.html").is_file(), "proxy wheel is missing the dashboard entrypoint")
+        _require(ui.joinpath("_next").is_dir(), "proxy wheel is missing Next.js assets")
+    return "dashboard assets are installed only with the proxy extra"
+
+
+def check_proxy_ui() -> str:
+    from fastapi.testclient import TestClient
+    from litellm.proxy.proxy_server import app, ui_path
+
+    root: Final = Path(ui_path)
+    configured_path: Final = os.getenv("LITELLM_UI_PATH")
+    if configured_path is not None:
+        _require(root == Path(configured_path), "proxy ignored the configured UI directory")
+    client: Final = TestClient(app)
+    for route in ("", "login/"):
+        response: Final = client.get(f"/ui/{route}")
+        _require(response.status_code == 200, f"dashboard route {route!r} returned {response.status_code}")
+        _require(
+            response.content == (root / route / "index.html").read_bytes(), f"wrong dashboard content for {route!r}"
+        )
+    for extension in ("*.js", "*.css"):
+        asset: Final = next(root.joinpath("_next").rglob(extension))
+        relative: Final = asset.relative_to(root).as_posix()
+        for prefix in ("", "/litellm-asset-prefix"):
+            asset_response: Final = client.get(f"{prefix}/{relative}")
+            _require(
+                asset_response.status_code == 200, f"dashboard asset {relative} returned {asset_response.status_code}"
+            )
+            _require(asset_response.content == asset.read_bytes(), f"wrong dashboard asset content for {relative}")
+    return "installed proxy serves dashboard, nested routes, JavaScript and CSS"
 
 
 def _require(condition: bool, message: str) -> None:
@@ -266,6 +312,8 @@ def main() -> int:
     profile: Final = parser.parse_args().profile
     checks: Final = (
         ("optional dependencies", partial(check_optional_dependencies, profile)),
+        ("UI packaging", partial(check_ui_packaging, profile)),
+        *((("proxy UI", check_proxy_ui),) if profile == "proxy" else ()),
         *(
             check
             for check in CHECKS
