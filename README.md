@@ -90,6 +90,12 @@ Managing LLM calls across providers gets complicated fast — different SDKs, au
 uv add litellm
 ```
 
+Optional features have separate installation extras. Use `litellm[aws]` for AWS SDK authentication and signing, `litellm[tokenizers]` for Hugging Face tokenizers, or `litellm[validation]` for local JSON Schema response validation. `litellm[sdk-extras]` includes all three
+
+Install `litellm[cli]` for the `lite` and `litellm-proxy` client commands, or `litellm[proxy]` for the gateway, its `litellm` command, and dashboard. The proxy extra includes SDK extras and client CLI dependencies
+
+When upgrading, select the extras your application uses. An ordinary upgrade leaves previously installed dependencies in place; use a fresh environment or re-sync your environment to realize the smaller core installation
+
 ```python
 from litellm import completion
 import os

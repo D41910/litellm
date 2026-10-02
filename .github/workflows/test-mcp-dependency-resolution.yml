@@ -58,7 +58,7 @@ jobs:
       - name: Check locked runtime installations
         if: steps.changes.outputs.decision != 'skip'
         run: |
-          for extra in core aws tokenizers aws,tokenizers sdk-extras mcp proxy; do
+          for extra in core cli validation aws tokenizers aws,tokenizers sdk-extras mcp proxy; do
             args=()
             if [ "$extra" = aws,tokenizers ]; then
               args=(--extra aws --extra tokenizers)
@@ -87,7 +87,7 @@ jobs:
         if: steps.changes.outputs.decision != 'skip'
         run: |
           wheel=$(realpath dist/mcp-check/litellm-[0-9]*.whl)
-          for extra in core aws tokenizers aws,tokenizers sdk-extras mcp proxy; do
+          for extra in core cli validation aws tokenizers aws,tokenizers sdk-extras mcp proxy; do
             args=()
             if [ "$extra" = aws,tokenizers ]; then
               args=(--extra aws --extra tokenizers)

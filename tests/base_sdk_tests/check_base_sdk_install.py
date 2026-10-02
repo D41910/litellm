@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import sys
+import subprocess
 import traceback
 from collections.abc import Callable
 from functools import partial
@@ -26,6 +27,9 @@ TOKENIZER_MODULES: Final = ("tokenizers", "huggingface_hub", "hf_xet", "fsspec")
 
 
 def check_optional_dependencies(profile: str) -> str:
+    if profile == "core":
+        for module in ("click", "filelock", "importlib_metadata", "zipp", "jsonschema", "referencing", "rpds"):
+            _require(importlib.util.find_spec(module) is None, f"core still installs {module}")
     for modules, expected in (
         (AWS_MODULES, profile in ("aws", "aws,tokenizers", "sdk-extras", "proxy")),
         (TOKENIZER_MODULES, profile in ("tokenizers", "aws,tokenizers", "sdk-extras", "proxy")),
@@ -34,6 +38,48 @@ def check_optional_dependencies(profile: str) -> str:
             present: Final = importlib.util.find_spec(name) is not None
             _require(present == expected, f"{name}: installed={present}, expected={expected} for {profile}")
     return f"optional dependencies match {profile}"
+
+
+def check_validation(profile: str) -> str:
+    import litellm
+    from litellm.litellm_core_utils.json_validation_rule import validate_schema
+
+    expected: Final = profile in ("validation", "sdk-extras", "proxy")
+    _require((importlib.util.find_spec("jsonschema") is not None) == expected, "unexpected validation dependencies")
+    if not expected:
+        try:
+            validate_schema({"type": "object"}, "{}")
+        except ImportError as error:
+            _require("litellm[validation]" in str(error), f"missing validation guidance: {error}")
+            return "requested validation requires its extra"
+        raise AssertionError("requested validation silently succeeded without its extra")
+    validate_schema({"type": "object"}, "{}")
+    for response in ("not json", "[]"):
+        try:
+            validate_schema({"type": "object"}, response)
+        except litellm.JSONSchemaValidationError:
+            continue
+        raise AssertionError(f"invalid response passed validation: {response}")
+    return "validation accepts valid responses and rejects invalid JSON or schema mismatches"
+
+
+def check_cli(profile: str) -> str:
+    import litellm
+
+    if profile in ("cli", "proxy"):
+        from litellm.proxy.proxy_cli import run_server
+
+        _require(litellm.run_server is run_server, "public server command identity changed")
+    for command, extra in (("litellm", "proxy"), ("lite", "cli"), ("litellm-proxy", "cli")):
+        executable: Final = Path(sys.executable).parent / command
+        result: Final = subprocess.run((str(executable), "--help"), capture_output=True, text=True, timeout=30)
+        if profile in ("cli", "proxy"):
+            _require(result.returncode == 0, f"{command} failed: {result.stderr}")
+            _require("Usage:" in result.stdout, f"{command} did not display help")
+        elif importlib.util.find_spec("click") is None:
+            _require(result.returncode != 0, f"{command} succeeded without CLI dependencies")
+            _require(f"litellm[{extra}]" in result.stderr, f"{command} omitted installation guidance")
+    return "console commands preserve help or explain their required extra"
 
 
 def check_ui_packaging(profile: str) -> str:
@@ -98,7 +144,10 @@ def check_import() -> str:
     import litellm
 
     _require(bool(litellm.__file__), "litellm has no __file__")
-    return f"imported litellm {version('litellm')}"
+    from litellm._version import version as reported_version
+
+    _require(reported_version == version("litellm"), "package version reporting changed")
+    return f"imported litellm {reported_version}"
 
 
 def check_completion() -> str:
@@ -307,17 +356,22 @@ def _run(check: Callable[[], str]) -> tuple[bool, str]:
 def main() -> int:
     parser: Final = argparse.ArgumentParser()
     parser.add_argument(
-        "--profile", choices=("core", "aws", "tokenizers", "aws,tokenizers", "sdk-extras", "proxy"), default="core"
+        "--profile",
+        choices=("core", "cli", "validation", "aws", "tokenizers", "aws,tokenizers", "sdk-extras", "proxy"),
+        default="core",
     )
     profile: Final = parser.parse_args().profile
     checks: Final = (
         ("optional dependencies", partial(check_optional_dependencies, profile)),
         ("UI packaging", partial(check_ui_packaging, profile)),
+        ("validation", partial(check_validation, profile)),
+        ("CLI", partial(check_cli, profile)),
         *((("proxy UI", check_proxy_ui),) if profile == "proxy" else ()),
         *(
             check
             for check in CHECKS
-            if profile != "proxy" or check[0] not in ("environment is base-only", "optional MCP installation guidance")
+            if not (profile in ("cli", "proxy") and check[0] == "environment is base-only")
+            and not (profile == "proxy" and check[0] == "optional MCP installation guidance")
         ),
         (
             "AWS behavior",
