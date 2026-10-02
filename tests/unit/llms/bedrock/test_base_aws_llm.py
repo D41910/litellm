@@ -2,6 +2,7 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 import os
+import sys
 import threading
 import time
 
@@ -12,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Final, Optional
 from unittest.mock import MagicMock, patch
 
 from botocore.awsrequest import AWSPreparedRequest, AWSRequest
@@ -26,8 +27,59 @@ from litellm.llms.bedrock.base_aws_llm import (
     BaseAWSLLM,
     Boto3CredentialsInfo,
     run_aws_signing,
+    sign_aws_json_post,
     sign_request_off_loop_if_aws,
 )
+
+
+def test_bearer_request_target_does_not_load_aws_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "botocore.credentials", None)
+    target: Final = BaseAWSLLM()._get_boto_credentials_from_optional_params(
+        {"aws_region_name": "us-east-1", "aws_bedrock_runtime_endpoint": "https://example.com"},
+        bearer_token="supplied-token",
+    )
+
+    assert target.aws_region_name == "us-east-1"
+    assert target.aws_bedrock_runtime_endpoint == "https://example.com"
+
+
+def test_aws_signing_missing_dependency_explains_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "botocore.auth", None)
+
+    with pytest.raises(ImportError, match=r"litellm\[aws\]"):
+        BaseAWSLLM()._sign_request(
+            service_name="bedrock", headers={}, optional_params={}, request_data={}, api_base="https://example.com"
+        )
+
+
+def test_credential_discovery_missing_dependency_explains_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "boto3", None)
+
+    with pytest.raises(ImportError, match=r"litellm\[aws\]"):
+        BaseAWSLLM().get_credentials(aws_access_key_id="key", aws_secret_access_key="secret")
+
+
+@pytest.mark.parametrize("api_key", (None, "supplied-token"))
+def test_bedrock_request_preparation_missing_dependency_explains_extra(
+    monkeypatch: pytest.MonkeyPatch, api_key: str | None
+) -> None:
+    monkeypatch.setitem(sys.modules, "botocore.awsrequest", None)
+
+    with pytest.raises(ImportError, match=r"litellm\[aws\]"):
+        BaseAWSLLM().get_request_headers(
+            credentials=None, aws_region_name="us-east-1", extra_headers=None,
+            endpoint_url="https://example.com", data="{}", headers={}, api_key=api_key,
+        )
+
+
+def test_json_post_signing_missing_dependency_explains_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "botocore.auth", None)
+
+    with pytest.raises(ImportError, match=r"litellm\[aws\]"):
+        sign_aws_json_post(
+            get_credentials=lambda: Credentials("key", "secret"), service_name="s3",
+            aws_region_name="us-east-1", url="https://example.com", body="{}", headers={},
+        )
 from tests.unit.llms.bedrock.event_loop_probe import EventLoopProbe
 
 # Global variable for the base_aws_llm.py file path

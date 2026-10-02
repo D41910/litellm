@@ -4,7 +4,7 @@ import base64
 import io
 import struct
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import anyio
 import anyio.lowlevel
@@ -29,7 +29,7 @@ from litellm.constants import (
     TOKEN_COUNTER_MAX_EXACT_CHARS,
 )
 from litellm.litellm_core_utils.asyncify import asyncify
-from litellm.litellm_core_utils.tokenizer import Encoding, HuggingFace, HuggingFaceTokenizer, OpenAIEncoding
+from litellm.litellm_core_utils.tokenizer import Encoding, HuggingFaceTokenizer, OpenAIEncoding
 from litellm.litellm_core_utils.url_utils import safe_get
 from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 from litellm.rust_bridge.tokenizer import get_encoding
@@ -53,6 +53,9 @@ from litellm.types.llms.openai import (
     OpenAIMessageContentListBlock,
 )
 from litellm.types.utils import Message, SelectTokenizerResponse
+
+if TYPE_CHECKING:
+    from litellm.litellm_core_utils.tokenizer import HuggingFace
 
 
 def get_modified_max_tokens(

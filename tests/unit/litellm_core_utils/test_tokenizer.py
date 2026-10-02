@@ -1,3 +1,4 @@
+from collections.abc import Callable
 import copy
 import os
 import pickle
@@ -19,6 +20,24 @@ from tests.unit.litellm_core_utils.test_decode_special_tokens import TOKENIZER_J
 
 ENCODINGS: Final = ("cl100k_base", "o200k_base", "p50k_base", "p50k_edit", "o200k_harmony")
 UNICODE_TEXTS: Final = ("hello world", "café 漢字 🙂", "", "a\ud800b", "\ud83d\ude42", "🙂\ud83d\ude42\udfff", " " * 64)
+
+
+@pytest.mark.parametrize("missing", ("tokenizers", "unrelated_dependency"))
+def test_added_token_metadata_reports_only_missing_tokenizer_extra(
+    missing: str, fail_optional_import: Callable[[str, ModuleNotFoundError], None]
+) -> None:
+    tokenizer: Final = HuggingFaceTokenizer.from_str(TOKENIZER_JSON)
+    failure: Final = ModuleNotFoundError("dependency unavailable", name=missing)
+
+    fail_optional_import("tokenizers", failure)
+    with pytest.raises(ImportError) as error:
+        tokenizer.get_added_tokens_decoder()
+
+    if missing == "tokenizers":
+        assert "litellm[tokenizers]" in str(error.value)
+        assert error.value.__cause__ is failure
+    else:
+        assert error.value is failure
 
 
 @pytest.mark.parametrize("name", ENCODINGS)

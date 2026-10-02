@@ -6,12 +6,30 @@ pull ``packaging``, ``pluggy`` and ``iniconfig`` into the environment and could 
 the very class of undeclared-dependency bug this guards against.
 """
 
+import argparse
+import asyncio
 import importlib.util
+import json
 import sys
 import traceback
 from collections.abc import Callable
+from functools import partial
+from typing import Final
 
 EXTRAS_ONLY_MODULES = ("fastapi", "uvicorn", "keyring", "mcp", "mcp_types", "httpx2", "httpcore2")
+AWS_MODULES: Final = ("boto3", "botocore", "s3transfer", "jmespath")
+TOKENIZER_MODULES: Final = ("tokenizers", "huggingface_hub", "hf_xet", "fsspec")
+
+
+def check_optional_dependencies(profile: str) -> str:
+    for modules, expected in (
+        (AWS_MODULES, profile in ("aws", "aws,tokenizers", "sdk-extras", "proxy")),
+        (TOKENIZER_MODULES, profile in ("tokenizers", "aws,tokenizers", "sdk-extras", "proxy")),
+    ):
+        for name in modules[:2] if expected else modules:
+            present: Final = importlib.util.find_spec(name) is not None
+            _require(present == expected, f"{name}: installed={present}, expected={expected} for {profile}")
+    return f"optional dependencies match {profile}"
 
 
 def _require(condition: bool, message: str) -> None:
@@ -73,6 +91,52 @@ def check_embedding() -> str:
     return "mock embedding round-trips"
 
 
+def check_streaming() -> str:
+    import litellm
+
+    stream: Final = litellm.completion(
+        model="gpt-4o", messages=[{"role": "user", "content": "ping"}], mock_response="pong", stream=True
+    )
+    content: Final = "".join(chunk.choices[0].delta.content or "" for chunk in stream if chunk.choices)
+    _require(content == "pong", f"stream returned {content!r}")
+
+    async def async_round_trip() -> None:
+        response: Final = await litellm.acompletion(
+            model="gpt-4o", messages=[{"role": "user", "content": "ping"}], mock_response="pong"
+        )
+        _require(response.choices[0].message.content == "pong", "async completion failed")
+        chunks: Final = await litellm.acompletion(
+            model="gpt-4o", messages=[{"role": "user", "content": "ping"}], mock_response="pong", stream=True
+        )
+        parts: Final = tuple([chunk.choices[0].delta.content or "" async for chunk in chunks if chunk.choices])
+        _require("".join(parts) == "pong", "async stream failed")
+
+    asyncio.run(async_round_trip())
+    return "sync/async completion and streaming round-trip"
+
+
+def check_retries() -> str:
+    import litellm
+
+    outcomes: Final = iter((False, True))
+
+    def attempt(*, max_retries: int, num_retries: int) -> str:
+        if not next(outcomes):
+            raise RuntimeError("transient failure")
+        return "recovered"
+
+    result: Final = litellm.completion_with_retries(original_function=attempt, num_retries=2)
+    _require(result == "recovered", "configured retries did not recover")
+    return "SDK retry helper recovers from a transient failure"
+
+
+def check_search_date_parsing() -> str:
+    from litellm.llms.brave.search.transformation import to_yyyy_mm_dd
+
+    _require(to_yyyy_mm_dd("2026-01-02") == "2026-01-02", "search result date parsing failed")
+    return "search date parsing works independently of AWS"
+
+
 def check_bundled_model_metadata() -> str:
     import litellm
 
@@ -114,7 +178,61 @@ def check_bedrock_credential_resolution() -> str:
         credentials.access_key == "AKIA-fake-base-sdk-check",
         f"get_credentials returned access_key={credentials.access_key!r}",
     )
-    return "bedrock credential resolution works (boto3 ships with the base SDK)"
+    return "bedrock credential resolution works with the AWS extra"
+
+
+def check_aws_install_guidance() -> str:
+    from litellm.llms.bedrock.base_aws_llm import BaseAWSLLM
+
+    try:
+        BaseAWSLLM()._sign_request(
+            service_name="bedrock",
+            headers={},
+            optional_params={"aws_region_name": "us-east-1"},
+            request_data={},
+            api_base="https://bedrock-runtime.us-east-1.amazonaws.com",
+        )
+    except ImportError as error:
+        _require("litellm[aws]" in str(error), f"missing AWS installation guidance: {error}")
+        return "AWS signing explains how to install litellm[aws]"
+    raise AssertionError("AWS signing succeeded without the AWS extra")
+
+
+def check_mantle_bearer_authentication() -> str:
+    from litellm.llms.bedrock.base_aws_llm import BaseAWSLLM
+    from litellm.llms.bedrock_mantle.common_utils import BedrockMantleAuthMixin
+
+    signer: Final = BedrockMantleAuthMixin()
+    signer._aws_signer = BaseAWSLLM()
+    headers, body = signer.sign_request(
+        headers={},
+        optional_params={},
+        request_data={"model": "example"},
+        api_base="https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions",
+        api_key="supplied-bearer-token",
+    )
+    _require(headers["Authorization"] == "Bearer supplied-bearer-token", "bearer token was not preserved")
+    _require(body is not None and json.loads(body) == {"model": "example"}, "request body changed")
+    return "Mantle bearer authentication does not require AWS credentials"
+
+
+def check_tokenizer_fallback() -> str:
+    import litellm
+    from litellm.rust_bridge import tokenizer
+
+    if importlib.util.find_spec("tokenizers") is not None:
+        custom: Final = litellm.create_tokenizer(litellm.utils.claude_json_str)
+        tokens: Final = litellm.encode(text="hello world", custom_tokenizer=custom)
+        _require(litellm.decode(tokens=tokens, custom_tokenizer=custom) == "hello world", "tokenizer round trip failed")
+        return "custom Hugging Face tokenizer round-trips"
+    try:
+        tokenizer._python_huggingface_tokenizer()
+    except ImportError as error:
+        _require("litellm[tokenizers]" in str(error), f"missing tokenizer installation guidance: {error}")
+    else:
+        raise AssertionError("Python Hugging Face tokenizer loaded without its extra")
+    _require(litellm.token_counter(model="claude-2", text="hello world") > 0, "token counting fallback failed")
+    return "missing Python tokenizer explains installation and automatic counting falls back"
 
 
 CHECKS: tuple[tuple[str, Callable[[], str]], ...] = (
@@ -123,9 +241,13 @@ CHECKS: tuple[tuple[str, Callable[[], str]], ...] = (
     ("optional MCP installation guidance", check_mcp_install_guidance),
     ("chat completion", check_completion),
     ("embedding", check_embedding),
+    ("streaming", check_streaming),
+    ("retries", check_retries),
+    ("search date parsing", check_search_date_parsing),
     ("bundled model metadata", check_bundled_model_metadata),
     ("token counter", check_token_counter),
-    ("bedrock credential resolution", check_bedrock_credential_resolution),
+    ("Mantle bearer authentication", check_mantle_bearer_authentication),
+    ("tokenizer behavior", check_tokenizer_fallback),
 )
 
 
@@ -137,18 +259,35 @@ def _run(check: Callable[[], str]) -> tuple[bool, str]:
 
 
 def main() -> int:
+    parser: Final = argparse.ArgumentParser()
+    parser.add_argument(
+        "--profile", choices=("core", "aws", "tokenizers", "aws,tokenizers", "sdk-extras", "proxy"), default="core"
+    )
+    profile: Final = parser.parse_args().profile
+    checks: Final = (
+        ("optional dependencies", partial(check_optional_dependencies, profile)),
+        *(
+            check
+            for check in CHECKS
+            if profile != "proxy" or check[0] not in ("environment is base-only", "optional MCP installation guidance")
+        ),
+        (
+            "AWS behavior",
+            check_bedrock_credential_resolution
+            if profile in ("aws", "aws,tokenizers", "sdk-extras", "proxy")
+            else check_aws_install_guidance,
+        ),
+    )
     print(f"base SDK smoke check on {sys.executable}")
-    for label, check in CHECKS:
+    for label, check in checks:
         passed, detail = _run(check)
         if not passed:
             print(f"FAIL  {label}:\n{detail}")
-            print(f"A base `pip install litellm` is broken at: {label}")
-            print("Something needed at import or call time is missing from [project].dependencies")
-            print("in pyproject.toml. Declaring it only in an extra is what causes this.")
+            print(f"SDK installation profile {profile} failed at: {label}")
             return 1
         print(f"PASS  {label}: {detail}")
 
-    print(f"\nall {len(CHECKS)} checks passed")
+    print(f"\nall {len(checks)} checks passed")
     return 0
 
 

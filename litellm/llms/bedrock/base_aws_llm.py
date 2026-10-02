@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import partial
+from importlib.util import find_spec
 from threading import Lock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, ParamSpec, TypeVar, cast, get_args, overload
@@ -361,6 +362,9 @@ class BaseAWSLLM(SignsRequestsWithAWS):
         """
         Return a boto3.Credentials object
         """
+        if find_spec("boto3") is None or find_spec("botocore") is None:
+            raise ImportError('Install AWS credential support with pip install "litellm[aws]"')
+
         # Only config-sourced credentials are expanded against the environment.
         # os.environ/<VAR> references in the model config are resolved at load time,
         # so any reference still present at this point is caller-supplied input and is
@@ -1545,10 +1549,6 @@ class BaseAWSLLM(SignsRequestsWithAWS):
         Returns:
             Credentials: Boto3 credentials object
         """
-        try:
-            from botocore.credentials import Credentials
-        except ImportError:
-            raise ImportError("Missing boto3 to call bedrock. Run 'pip install boto3'.")
         aws_region_name: Final = self._get_aws_region_name(optional_params, model)
         optional_params.pop("aws_region_name", None)
         auth_params: Final = pop_aws_auth_params(optional_params)
@@ -1585,7 +1585,7 @@ class BaseAWSLLM(SignsRequestsWithAWS):
             try:
                 from botocore.awsrequest import AWSRequest
             except ImportError:
-                raise ImportError("Missing boto3 to call bedrock. Run 'pip install boto3'.")
+                raise ImportError("Missing boto3 to call bedrock. Run pip install 'litellm[aws]'.")
             headers["Authorization"] = f"Bearer {aws_bearer_token}"
             request = AWSRequest(method="POST", url=endpoint_url, data=data, headers=headers)
         else:
@@ -1594,7 +1594,7 @@ class BaseAWSLLM(SignsRequestsWithAWS):
                 from botocore.awsrequest import AWSRequest
                 from botocore.exceptions import NoCredentialsError
             except ImportError:
-                raise ImportError("Missing boto3 to call bedrock. Run 'pip install boto3'.")
+                raise ImportError("Missing boto3 to call bedrock. Run pip install 'litellm[aws]'.")
 
             if credentials is None:
                 raise NoCredentialsError()
@@ -1692,7 +1692,7 @@ class BaseAWSLLM(SignsRequestsWithAWS):
             from botocore.awsrequest import AWSRequest
             from botocore.credentials import Credentials
         except ImportError:
-            raise ImportError("Missing boto3 to call bedrock. Run 'pip install boto3'.")
+            raise ImportError("Missing boto3 to call bedrock. Run pip install 'litellm[aws]'.")
 
         auth_params: Final = AwsAuthParams.model_validate(optional_params)
         aws_region_name: Final = self._get_aws_region_name(optional_params=optional_params, model=model)
@@ -1742,7 +1742,7 @@ def sign_aws_json_post(
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
     except ImportError:
-        raise ImportError(f"Missing boto3 to call {service_name}. Run 'pip install boto3'.")
+        raise ImportError(f"Missing boto3 to call {service_name}. Run pip install 'litellm[aws]'.")
 
     aws_request: Final = AWSRequest(method="POST", url=url, data=body, headers=headers)
     SigV4Auth(get_credentials(), service_name, aws_region_name).add_auth(aws_request)
