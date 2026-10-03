@@ -43,13 +43,18 @@ def test_bearer_request_target_does_not_load_aws_credentials(monkeypatch: pytest
     assert target.aws_bedrock_runtime_endpoint == "https://example.com"
 
 
-def test_aws_signing_missing_dependency_explains_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("service_name", ("bedrock", "sagemaker"))
+def test_aws_signing_missing_dependency_explains_extra(
+    monkeypatch: pytest.MonkeyPatch, service_name: str
+) -> None:
     monkeypatch.setitem(sys.modules, "botocore.auth", None)
 
-    with pytest.raises(ImportError, match=r"litellm\[aws\]"):
+    with pytest.raises(ImportError) as caught:
         BaseAWSLLM()._sign_request(
-            service_name="bedrock", headers={}, optional_params={}, request_data={}, api_base="https://example.com"
+            service_name=service_name, headers={}, optional_params={}, request_data={}, api_base="https://example.com"
         )
+
+    assert str(caught.value) == 'Install AWS support with pip install "litellm[aws]"'
 
 
 def test_credential_discovery_missing_dependency_explains_extra(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,11 +70,13 @@ def test_bedrock_request_preparation_missing_dependency_explains_extra(
 ) -> None:
     monkeypatch.setitem(sys.modules, "botocore.awsrequest", None)
 
-    with pytest.raises(ImportError, match=r"litellm\[aws\]"):
+    with pytest.raises(ImportError) as caught:
         BaseAWSLLM().get_request_headers(
             credentials=None, aws_region_name="us-east-1", extra_headers=None,
             endpoint_url="https://example.com", data="{}", headers={}, api_key=api_key,
         )
+
+    assert str(caught.value) == 'Install AWS support with pip install "litellm[aws]"'
 
 
 def test_json_post_signing_missing_dependency_explains_extra(monkeypatch: pytest.MonkeyPatch) -> None:

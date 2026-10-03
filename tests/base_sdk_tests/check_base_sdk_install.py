@@ -165,12 +165,17 @@ def check_aws_feature_guidance() -> str:
         partial(litellm.image_generation, model="bedrock/amazon.nova-canvas-v1:0", prompt="tree", **common),
         partial(litellm.rerank, model="bedrock/cohere.rerank-v3-5:0", query="hello", documents=["hello"], **common),
         partial(litellm.completion, model="sagemaker/test-endpoint", messages=messages, **common),
+        partial(litellm.completion, model="sagemaker_chat/test-endpoint", messages=messages, **common),
+        partial(litellm.completion, model="bedrock/invoke/anthropic.claude-sonnet-5-5", messages=messages, **common),
     )
     for action in provider_calls:
         try:
             action()
         except litellm.APIConnectionError as error:
-            _require("litellm[aws]" in str(error), "provider wrapper lost installation guidance")
+            _require(
+                'Install AWS support with pip install "litellm[aws]"' in str(error),
+                "provider wrapper lost consistent installation guidance",
+            )
             _require(isinstance(error.__cause__ or error.__context__, ImportError), "provider wrapper lost the import failure")
         else:
             raise AssertionError("AWS provider unexpectedly succeeded without its extra")
