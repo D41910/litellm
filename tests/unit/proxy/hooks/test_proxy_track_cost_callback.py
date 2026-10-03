@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Final
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,6 +11,7 @@ import pytest
 
 from litellm._logging import verbose_proxy_logger
 from litellm.litellm_core_utils import internal_call_metadata as billing
+from litellm.litellm_core_utils.core_helpers import budget_reservation_from_metadata, get_litellm_metadata_from_kwargs
 from litellm.litellm_core_utils.internal_call_metadata import MODEL_ACCESS_GROUP_METADATA_KEY
 from litellm.proxy._types import SpendLogsPayload, UserAPIKeyAuth
 from litellm.proxy.collector import SpendEventConsumer
@@ -25,6 +27,7 @@ from litellm.proxy.hooks.proxy_track_cost_callback import (
 )
 from litellm.proxy.route_llm_request import ProxyModelNotFoundError
 from litellm.proxy.utils import ProxyUpdateSpend
+from litellm.proxy.spend_tracking.evaluation_budget import EvaluationBudgetReservation
 from litellm.proxy.spend_tracking.spend_event import SpendEventDecodeError, build_spend_event, decode_spend_event
 from litellm.proxy.spend_tracking.spend_event_producer import SpendEventProducer, UnixAddress
 from litellm.proxy.spend_tracking.spend_tracking_utils import get_logging_payload
@@ -2145,16 +2148,19 @@ async def test_async_post_call_failure_hook_records_recovered_partial_spend(eval
         billing.EVALUATION_BILLING_OWNER_KEY: owner if captured else None,
         "model": "anthropic/claude-haiku-4-5",
         "messages": [{"role": "user", "content": "Hello"}],
-        "metadata": {},
+        "metadata": {"agent_id": "sampled-agent", "billing_agent_id": "billed-agent"},
         "proxy_server_request": {"request_id": "rid"},
         "response_cost": 3.5e-05,
         "combined_usage_object": Usage(prompt_tokens=30, completion_tokens=1, total_tokens=31),
     }
 
-    with billing.evaluation_billing_context(owner), patch(
-        "litellm.proxy.db.db_spend_update_writer.DBSpendUpdateWriter.update_database",
-        new_callable=AsyncMock,
-    ) as mock_update_database:
+    with (
+        billing.evaluation_billing_context(owner),
+        patch(
+            "litellm.proxy.db.db_spend_update_writer.DBSpendUpdateWriter.update_database",
+            new_callable=AsyncMock,
+        ) as mock_update_database,
+    ):
         await logger.async_post_call_failure_hook(
             request_data=request_data,
             original_exception=Exception("MidStreamFallbackError: read timeout"),
@@ -2171,6 +2177,8 @@ async def test_async_post_call_failure_hook_records_recovered_partial_spend(eval
             written["kwargs"], written["completion_response"], written["start_time"], written["end_time"]
         )
         assert row["user"] == written["user_id"]
+        assert row["agent_id"] == (None if evaluation else "sampled-agent")
+        assert row["billing_agent_id"] == (None if evaluation else "billed-agent")
         assert row["total_tokens"] == 31
 
 
@@ -2516,9 +2524,9 @@ async def test_spend_counters_keep_every_granted_group_when_the_deployment_is_un
     assert charged == ("premium", "tier0")
 
 
-def _offload_kwargs(evaluation: bool = False) -> dict:
-    big_prompt = "x" * 10_000
-    reservation = {"reserved_cost": 0.5, "entries": [{"counter_key": "key:hash-1", "reserved_cost": 0.5}]}
+def _offload_kwargs(evaluation: bool = False, call_origin: str | None = None) -> Mapping[str, object]:
+    big_prompt: Final = "x" * 10_000
+    reservation: Final = {"reserved_cost": 0.5, "entries": [{"counter_key": "key:hash-1", "reserved_cost": 0.5}]}
     return {
         billing.EVALUATION_BILLING_OWNER_KEY: billing.EvaluationBillingOwner("admin") if evaluation else None,
         "litellm_call_id": "call-1",
@@ -2526,6 +2534,7 @@ def _offload_kwargs(evaluation: bool = False) -> dict:
         "model": "gpt-4o",
         "custom_llm_provider": "openai",
         "agent_id": "agent-1",
+        "billing_agent_id": "billed-agent-1",
         "stream": False,
         "cache_hit": None,
         "response_cost": 0.0125,
@@ -2538,7 +2547,9 @@ def _offload_kwargs(evaluation: bool = False) -> dict:
             "proxy_server_request": {"body": {"messages": [{"role": "user", "content": big_prompt}]}},
             "metadata": {
                 "user_api_key": "hash-1",
-                "internal_call_origin": "shadow_eval_judge" if evaluation else None,
+                "internal_call_origin": call_origin or ("shadow_eval_judge" if evaluation else None),
+                "agent_id": "agent-1",
+                "billing_agent_id": "billed-agent-1",
                 "user_api_key_hash": "hash-1",
                 "user_api_key_alias": "alias-1",
                 "user_api_key_user_id": "user-1",
@@ -2553,6 +2564,8 @@ def _offload_kwargs(evaluation: bool = False) -> dict:
             },
         },
         "standard_logging_object": {
+            "agent_id": "agent-1",
+            "billing_agent_id": "billed-agent-1",
             "id": "chatcmpl-1",
             "trace_id": "trace-1",
             "response_cost": 0.0125,
@@ -2570,6 +2583,8 @@ def _offload_kwargs(evaluation: bool = False) -> dict:
             "response": {"choices": [{"message": {"content": "y" * 10_000}}]},
             "model_parameters": {"temperature": 0.1},
             "metadata": {
+                "agent_id": "agent-1",
+                "billing_agent_id": "billed-agent-1",
                 "user_api_key_hash": "hash-1",
                 "user_api_key_end_user_id": "end-user-1",
                 "usage_object": {"prompt_tokens": 5000, "completion_tokens": 4000, "total_tokens": 9000},
@@ -2721,11 +2736,34 @@ async def _spend_row_written_by(run) -> tuple[SpendLogsPayload, dict, tuple[str,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("evaluation", (False, True))
-async def test_sidecar_writes_the_same_spend_row_and_counters_as_the_in_process_path(evaluation: bool) -> None:
+@pytest.mark.parametrize(
+    "evaluation,call_origin,reserved",
+    ((False, None, False), (True, "shadow_eval_judge", False), (True, "autorouter_compaction", True)),
+)
+async def test_sidecar_writes_the_same_spend_row_and_counters_as_the_in_process_path(
+    evaluation: bool, call_origin: str | None, reserved: bool
+) -> None:
     start_time = datetime(2026, 1, 1, 0, 0, 0)
     end_time = datetime(2026, 1, 1, 0, 0, 2)
-    kwargs: Final = _offload_kwargs(evaluation)
+    creator_reservation: Final = (
+        EvaluationBudgetReservation(
+            total={"reserved_cost": 0.5, "entries": [{"counter_key": "spend:user:admin", "reserved_cost": 0.5}]},
+            model=None,
+        )
+        if reserved
+        else None
+    )
+    kwargs: Final = {
+        **_offload_kwargs(evaluation, call_origin),
+        billing.EVALUATION_BUDGET_RESERVATION_KEY: creator_reservation,
+    }
+    expected_reservation: Final = (
+        creator_reservation.total
+        if creator_reservation is not None
+        else None
+        if evaluation
+        else budget_reservation_from_metadata(get_litellm_metadata_from_kwargs(kwargs))
+    )
 
     async def in_process() -> None:
         await _ProxyDBLogger().async_log_success_event(kwargs, _offload_response(), start_time, end_time)
@@ -2736,12 +2774,13 @@ async def test_sidecar_writes_the_same_spend_row_and_counters_as_the_in_process_
 
     async def via_sidecar() -> None:
         producer: Final = SpendEventProducer(
-            address=UnixAddress(path="/nonexistent/spend.sock"), on_unavailable="fallback",
-            buffer_size=10, connect_timeout=0.1, fallback=replay,
+            address=UnixAddress(path="/nonexistent/spend.sock"),
+            on_unavailable="fallback",
+            buffer_size=10,
+            connect_timeout=0.1,
+            fallback=replay,
         )
-        await _ProxyDBLogger(producer).async_log_success_event(
-            kwargs, _offload_response(), start_time, end_time
-        )
+        await _ProxyDBLogger(producer).async_log_success_event(kwargs, _offload_response(), start_time, end_time)
         await producer.close(drain_timeout=5.0)
 
     in_process_row, in_process_counters, in_process_tools = await _spend_row_written_by(in_process)
@@ -2754,8 +2793,9 @@ async def test_sidecar_writes_the_same_spend_row_and_counters_as_the_in_process_
     assert bool(in_process_row["api_key"]) == (not evaluation)
     assert in_process_row["organization_id"] == ("" if evaluation else "org-1")
     assert in_process_row["agent_id"] == (None if evaluation else "agent-1")
+    assert in_process_row["billing_agent_id"] == (None if evaluation else "billed-agent-1")
     origin: Final = json.loads(in_process_row["metadata"])["internal_call_origin"]
-    assert origin == ("shadow_eval_judge" if evaluation else None)
+    assert origin == call_origin
     assert in_process_row["total_tokens"] == 9000
     assert (in_process_row["prompt_tokens"], in_process_row["completion_tokens"]) == (5000, 4000)
     assert in_process_row["model_id"] == "deployment-1"
@@ -2770,13 +2810,10 @@ async def test_sidecar_writes_the_same_spend_row_and_counters_as_the_in_process_
     assert in_process_counters["project_id"] == (None if evaluation else "project-1")
     assert in_process_counters["end_user_id"] == (None if evaluation else "end-user-1")
     assert in_process_counters["response_cost"] == 0.0125
-    if evaluation:
-        assert in_process_counters["budget_reservation"] is None
-    else:
-        assert in_process_counters["budget_reservation"]["reserved_cost"] == 0.5
+    assert in_process_counters["budget_reservation"] is expected_reservation
     assert in_process_counters["model_access_groups"] == (() if evaluation else ("premium",))
     assert sidecar_tools == in_process_tools == ("get_weather",)
-    assert kwargs["litellm_params"]["metadata"]["user_api_key_user_id"] == "user-1"
+    assert get_litellm_metadata_from_kwargs(dict(kwargs))["user_api_key_user_id"] == "user-1"
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ from types import MappingProxyType, TracebackType
 from typing import TYPE_CHECKING, Any, Final, Literal, Union, cast
 
 from httpx import Response
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
 import litellm
 from litellm import _custom_logger_compatible_callbacks_literal
@@ -80,6 +80,7 @@ from litellm.litellm_core_utils.error_normalization import normalize_error
 from litellm.litellm_core_utils.get_litellm_params import get_litellm_params
 from litellm.litellm_core_utils.internal_call_metadata import (
     EVALUATION_BILLING_OWNER_KEY,
+    EVALUATION_BUDGET_RESERVATION_KEY,
     MODEL_ACCESS_GROUP_METADATA_KEY,
     EvaluationBillingOwner,
     get_evaluation_billing_owner,
@@ -238,6 +239,7 @@ if TYPE_CHECKING:
     from litellm.litellm_core_utils.llm_cost_calc.utils import BilledTokenRates
     from litellm.llms.base_llm.passthrough.transformation import PassthroughStreamCollector
     from litellm.proxy.hooks.autorouter_baseline_cache import BaselineCacheContext, CapturedBaselineObservation
+    from litellm.proxy.spend_tracking.evaluation_budget import EvaluationBudgetReservation
 try:
     from litellm_enterprise.enterprise_callbacks.callback_controls import (
         EnterpriseCallbackControls,
@@ -621,6 +623,7 @@ class Logging(LiteLLMLoggingBaseClass):
         self.litellm_call_id = litellm_call_id
         self.litellm_trace_id: str = litellm_trace_id if litellm_trace_id else str(uuid.uuid4())
         self.evaluation_billing_owner: Final[EvaluationBillingOwner | None] = get_evaluation_billing_owner()
+        self.evaluation_budget_reservation: EvaluationBudgetReservation | None = None
 
         # Capture the pre-call *value* (not a contextvars.Token) so restoration works
         # even if this attempt's own logging ends up dispatched onto a different
@@ -718,6 +721,7 @@ class Logging(LiteLLMLoggingBaseClass):
             "applied_guardrails": applied_guardrails,
             "model": model,
             EVALUATION_BILLING_OWNER_KEY: self.evaluation_billing_owner,
+            EVALUATION_BUDGET_RESERVATION_KEY: self.evaluation_budget_reservation,
         }
 
         # Set by proxy request handlers to defer spend-log fire until after
@@ -950,6 +954,7 @@ class Logging(LiteLLMLoggingBaseClass):
                 **self.optional_params,
                 **additional_params,
                 EVALUATION_BILLING_OWNER_KEY: self.evaluation_billing_owner,
+                EVALUATION_BUDGET_RESERVATION_KEY: self.evaluation_budget_reservation,
             }
         )
 
@@ -2219,6 +2224,16 @@ class Logging(LiteLLMLoggingBaseClass):
         usage: Final = getattr(assembled, "usage", None)
         if isinstance(usage, Usage):
             self.record_partial_usage_for_failure(usage, self._response_cost_calculator(result=assembled) or 0.0)
+
+    def recover_failure_cost(self, result: object) -> float:
+        if isinstance(result, ModelResponse):
+            self.record_assembled_response_for_failure(result)
+        elif isinstance(result, ResponsesAPIResponse):
+            self.record_assembled_response_for_failure(self._translate_responses_api_response_to_model_response(result))
+            self.model_call_details["response_cost"] = self._response_cost_calculator(result=result)
+        elif result is not None and self.call_type == CallTypes.anthropic_messages.value:
+            self.record_assembled_response_for_failure(self._handle_anthropic_messages_response_logging(result))
+        return TypeAdapter(float).validate_python(self.model_call_details.get("response_cost") or 0.0)
 
     async def dispatch_failure_handlers(
         self,

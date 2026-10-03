@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from litellm.caching.in_memory_cache import InMemoryCache
 from litellm.constants import INTERNAL_CALL_ORIGIN_METADATA_KEY
+from litellm.models.user import LiteLLM_UserTable
 from litellm.integrations.shadow_eval_logger import (
     _MAX_CONCURRENT_SHADOW_TASKS,
     _MAX_ERROR_CHARS,
@@ -75,7 +76,7 @@ def _prisma(jobs=(), attempt_counts=(), attempt_costs=()) -> MagicMock:
         ]
     )
     prisma.db.litellm_shadowevalattempt.create = AsyncMock()
-    prisma.db.litellm_usertable.find_unique = AsyncMock(return_value=None)
+    prisma.db.litellm_usertable.find_unique = AsyncMock(return_value=LiteLLM_UserTable(user_id="evaluation-admin"))
     return prisma
 
 
@@ -2536,6 +2537,7 @@ class TestSamplingFunnel:
     ("acompletion", "initiating-admin", "found"),
     ("anthropic_messages", None, "found"),
     ("aresponses", "deleted-admin", "missing"),
+    ("acompletion", None, "missing"),
     ("acompletion", "unreadable-admin", "error"),
 ])
 async def test_evaluation_uses_current_creator_budgets_and_preserves_source(
@@ -2557,6 +2559,8 @@ async def test_evaluation_uses_current_creator_budgets_and_preserves_source(
     limiter: Final = budgets._PROXY_VirtualKeyModelMaxBudgetLimiter(dual_cache=DualCache())
     prisma: Final = _prisma(jobs=[_job_record(_job(created_by=creator))])
     source: Final = {"user_api_key_user_id": "sampled-user", "user_api_key_team_id": "sampled-team"}
+    if lookup == "missing":
+        prisma.db.litellm_usertable.find_unique.return_value = None
     if lookup == "error":
         prisma.db.litellm_usertable.find_unique.side_effect = RuntimeError("creator budget unavailable")
 
@@ -2564,6 +2568,8 @@ async def test_evaluation_uses_current_creator_budgets_and_preserves_source(
         owner: Final = ownership.get_evaluation_billing_owner()
         assert owner is not None and owner.user_id == owner_id
         assert owner.user_model_max_budget == (creator_budget if lookup == "found" else None)
+        assert owner.max_budget == (1.0 if lookup == "found" else None)
+        assert owner.spend == (0.1 if lookup == "found" else 0.0)
         metadata: Final = kwargs["metadata"]
         assert isinstance(metadata, Mapping)
         assert all(metadata[key] == value for key, value in source.items())
@@ -2584,7 +2590,7 @@ async def test_evaluation_uses_current_creator_budgets_and_preserves_source(
             model: {"budget_limit": 0.02, "time_period": period} for model in ("my-router", "judge-model")
         }
         if lookup == "found":
-            row: Final = LiteLLM_UserTable(user_id=owner_id, model_max_budget=creator_budget)
+            row: Final = LiteLLM_UserTable(user_id=owner_id, model_max_budget=creator_budget, max_budget=1.0, spend=0.1)
             if sample == 1:
                 prisma.db.litellm_usertable.find_unique.return_value = row
             else:
@@ -2600,8 +2606,11 @@ async def test_evaluation_uses_current_creator_budgets_and_preserves_source(
             model: {"current_spend": 0.025 if lookup == "found" else 0.0, "budget_limit": 0.02, "time_period": period}
             for model in creator_budget
         }
-        assert prisma.db.litellm_shadowevalattempt.create.await_count == sample
-        assert prisma.db.litellm_shadowevalattempt.create.call_args.kwargs["data"]["outcome"] in ("real", "shadow", "tie")
+        admitted: Final = lookup == "found" or (creator is None and lookup == "missing")
+        assert prisma.db.litellm_shadowevalattempt.create.await_count == (sample if admitted else 0)
+        assert logger._test_funnel == ([] if admitted else [("job-1", "withheld")])
+        if admitted:
+            assert prisma.db.litellm_shadowevalattempt.create.call_args.kwargs["data"]["outcome"] in ("real", "shadow", "tie")
         assert event["litellm_params"]["metadata"] == source
         assert ownership.get_evaluation_billing_owner() is None
     prisma.db.litellm_usertable.find_unique.assert_awaited_once_with(

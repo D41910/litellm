@@ -80,6 +80,7 @@ _EMPTY_METADATA: Final[Mapping[str, object]] = MappingProxyType({})
 _CHAT_REQUEST_ADAPTER: Final = TypeAdapter(Mapping[str, object])
 _CHAT_MESSAGES_ADAPTER: Final = TypeAdapter(tuple[Mapping[str, object], ...])
 _MESSAGE_ITEMS_ADAPTER: Final = TypeAdapter(tuple[object, ...])
+_CREATOR_MODEL_BUDGET: Final = TypeAdapter(Mapping[str, object] | None)
 
 
 def _chat_messages(kwargs: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
@@ -1087,18 +1088,11 @@ class ShadowEvalLogger(CustomLogger):
             if spend >= job.max_budget:
                 self._record_funnel(job.id, "withheld")
                 return
-        from litellm.proxy.auth.user_api_key_auth import _read_user_model_max_budget
-        from litellm.proxy.proxy_server import litellm_proxy_admin_name, proxy_logging_obj, user_api_key_cache
-
-        creator_id: Final = job.created_by or litellm_proxy_admin_name
-        creator_model_budget: Final = await _read_user_model_max_budget(
-            user_id=creator_id,
-            prisma_client=prisma,
-            user_api_key_cache=user_api_key_cache,
-            parent_otel_span=None,
-            proxy_logging_obj=proxy_logging_obj,
-        )
-        with evaluation_billing_context(EvaluationBillingOwner(creator_id, creator_model_budget)):
+        owner: Final = await _evaluation_billing_owner(prisma, job.created_by)
+        if owner is None:
+            self._record_funnel(job.id, "withheld")
+            return
+        with evaluation_billing_context(owner):
             for arm_router in job.arm_router_names:
                 await self._run_shadow_arm(
                     prisma=prisma,
@@ -1397,3 +1391,32 @@ def _default_prisma_provider() -> "PrismaClient | None":
     except ImportError:
         return None
     return prisma_client
+
+
+async def _evaluation_billing_owner(prisma: "PrismaClient", created_by: str | None) -> EvaluationBillingOwner | None:
+    from litellm.proxy.auth.auth_checks import get_user_object
+    from litellm.proxy.proxy_server import litellm_proxy_admin_name, proxy_logging_obj, user_api_key_cache
+    from litellm.types.proxy.auth.auth_checks import UserNotFoundError
+
+    creator_id: Final = created_by or litellm_proxy_admin_name
+    try:
+        creator: Final = await get_user_object(
+            user_id=creator_id,
+            prisma_client=prisma,
+            user_api_key_cache=user_api_key_cache,
+            user_id_upsert=False,
+            proxy_logging_obj=proxy_logging_obj,
+        )
+    except UserNotFoundError:
+        return EvaluationBillingOwner(creator_id) if creator_id == litellm_proxy_admin_name else None
+    except Exception as e:  # noqa: BLE001  # optional evaluation work must not spend against unverifiable limits
+        verbose_logger.warning("shadow_eval: creator budget unavailable for %s: %s", creator_id, e)
+        return None
+    if creator is None:
+        return None
+    return EvaluationBillingOwner(
+        creator_id,
+        _CREATOR_MODEL_BUDGET.validate_python(creator.model_max_budget),
+        creator.max_budget,
+        creator.spend or 0.0,
+    )

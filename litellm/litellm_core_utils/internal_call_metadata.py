@@ -36,18 +36,19 @@ BUDGET_RESERVATION_METADATA_KEYS: Final = frozenset({"user_api_key_budget_reserv
 class EvaluationBillingOwner:
     user_id: str
     user_model_max_budget: Mapping[str, object] | None = None
+    max_budget: float | None = None
+    spend: float = 0.0
 
 
 EVALUATION_BILLING_OWNER_KEY: Final = "_evaluation_billing_owner"
+EVALUATION_BUDGET_RESERVATION_KEY: Final = "_evaluation_budget_reservation"
 _EVALUATION_BILLING_OWNER: Final[ContextVar[EvaluationBillingOwner | None]] = ContextVar(
     "evaluation_billing_owner", default=None
 )
 _BILLING_MAPPING: Final = TypeAdapter(Mapping[str, object])
-_BILLING_DICT: Final = TypeAdapter(dict[str, object])
-_BILLING_TAGS: Final = TypeAdapter(list[str])
 _EMPTY_BILLING_FIELDS: Final[Mapping[str, object]] = MappingProxyType({})
 _BILLING_IDENTITY_FIELDS: Final = frozenset(
-    {"user_api_key", "user_api_end_user_max_budget", "team_id", "team_alias", "agent_id"}
+    {"user_api_key", "user_api_end_user_max_budget", "team_id", "team_alias", "agent_id", "billing_agent_id"}
 )
 
 
@@ -69,36 +70,61 @@ def get_evaluation_billing_owner_from_kwargs(kwargs: Mapping[str, object]) -> Ev
     return owner if isinstance(owner, EvaluationBillingOwner) else None
 
 
-def _billing_metadata(value: object, owner: EvaluationBillingOwner) -> Mapping[str, object]:
-    metadata: Final = _BILLING_MAPPING.validate_python(value) if isinstance(value, Mapping) else _EMPTY_BILLING_FIELDS
-    return _BILLING_DICT.validate_python(
-        MappingProxyType(
-            {
-                **MappingProxyType(
-                    {
-                        key: None if key.startswith("user_api_key_") or key in _BILLING_IDENTITY_FIELDS else item
-                        for key, item in metadata.items()
-                    }
-                ),
-                "user_api_key_user_id": owner.user_id,
-                "user_api_key_user_model_max_budget": owner.user_model_max_budget,
-                "tags": _BILLING_TAGS.validate_python(()),
-            }
-        )
-    )
+def _billing_mapping(value: object) -> Mapping[str, object] | None:
+    return _BILLING_MAPPING.validate_python(value) if isinstance(value, Mapping) else None
+
+
+def _evaluation_budget_reservation(kwargs: Mapping[str, object]) -> Mapping[str, object] | None:
+    handle: Final = kwargs.get(EVALUATION_BUDGET_RESERVATION_KEY)
+    if handle is None:
+        return None
+    from litellm.proxy.spend_tracking.evaluation_budget import EvaluationBudgetReservation
+
+    return handle.total if isinstance(handle, EvaluationBudgetReservation) else None
+
+
+def _billing_metadata(
+    metadata: Mapping[str, object] | None, owner: EvaluationBillingOwner, reservation: Mapping[str, object] | None
+) -> Mapping[str, object]:
+    return {
+        **{
+            key: None if key.startswith("user_api_key_") or key in _BILLING_IDENTITY_FIELDS else item
+            for key, item in (metadata or _EMPTY_BILLING_FIELDS).items()
+        },
+        "user_api_key_user_id": owner.user_id,
+        "user_api_key_user_model_max_budget": owner.user_model_max_budget,
+        "user_api_key_budget_reservation": reservation,
+        "tags": [],
+    }
 
 
 def _billing_request(value: object) -> object:
-    if not isinstance(value, Mapping):
+    request: Final = _billing_mapping(value)
+    if request is None:
         return value
-    request: Final = _BILLING_MAPPING.validate_python(value)
-    body_value: Final = request.get("body")
-    if not isinstance(body_value, Mapping):
-        return _BILLING_DICT.validate_python(request)
-    body: Final = _BILLING_MAPPING.validate_python(body_value)
-    return _BILLING_DICT.validate_python(
-        MappingProxyType({**request, "body": _BILLING_DICT.validate_python(MappingProxyType({**body, "user": None}))})
-    )
+    body: Final = _billing_mapping(request.get("body"))
+    if body is None:
+        return dict(request)
+    return {**request, "body": {**body, "user": None}}
+
+
+def _billing_fields(
+    fields: Mapping[str, object], owner: EvaluationBillingOwner, reservation: Mapping[str, object] | None
+) -> Mapping[str, object]:
+    alternate: Final = _billing_mapping(fields.get("litellm_metadata"))
+    return {
+        **fields,
+        "agent_id": None,
+        "billing_agent_id": None,
+        **({"user": owner.user_id} if "user" in fields else {}),
+        "metadata": _billing_metadata(_billing_mapping(fields.get("metadata")), owner, reservation),
+        **({"litellm_metadata": _billing_metadata(alternate, owner, reservation)} if alternate else {}),
+        **(
+            {"proxy_server_request": _billing_request(fields["proxy_server_request"])}
+            if "proxy_server_request" in fields
+            else {}
+        ),
+    }
 
 
 def project_evaluation_billing_kwargs(
@@ -107,87 +133,35 @@ def project_evaluation_billing_kwargs(
     """Copy an evaluation's receipt onto its creator without changing request state."""
     owner: Final = get_evaluation_billing_owner_from_kwargs(kwargs)
     if owner is None:
-        return kwargs if isinstance(kwargs, dict) else _BILLING_DICT.validate_python(kwargs)
-    params_value: Final = kwargs.get("litellm_params")
-    params: Final = (
-        _BILLING_MAPPING.validate_python(params_value) if isinstance(params_value, Mapping) else _EMPTY_BILLING_FIELDS
-    )
-    alternate_value: Final = params.get("litellm_metadata")
-    alternate_metadata: Final = (
-        _BILLING_MAPPING.validate_python(alternate_value) if isinstance(alternate_value, Mapping) else None
-    )
-    payload_value: Final = kwargs.get("standard_logging_object")
-    payload: Final = _BILLING_MAPPING.validate_python(payload_value) if isinstance(payload_value, Mapping) else None
-    projected_params: Final = _BILLING_DICT.validate_python(
-        MappingProxyType(
+        return kwargs if isinstance(kwargs, dict) else dict(kwargs)
+    reservation: Final = _evaluation_budget_reservation(kwargs)
+    params: Final = _billing_mapping(kwargs.get("litellm_params")) or _EMPTY_BILLING_FIELDS
+    payload: Final = _billing_mapping(kwargs.get("standard_logging_object"))
+    receipt_fields: Final[Mapping[str, object]] = {
+        "user": owner.user_id,
+        "end_user": None,
+        "request_tags": [],
+        "request_model_access_groups": (),
+    }
+    return {
+        **_billing_fields(kwargs, owner, reservation),
+        **receipt_fields,
+        "user_api_key_end_user_id": None,
+        "litellm_params": {
+            **_billing_fields(params, owner, reservation),
+            "user_api_key_end_user_id": None,
+        },
+        **(
             {
-                **params,
-                **(MappingProxyType({"user": owner.user_id}) if "user" in params else _EMPTY_BILLING_FIELDS),
-                "user_api_key_end_user_id": None,
-                "metadata": _billing_metadata(params.get("metadata"), owner),
-                # A truthy alternate bucket wins metadata resolution; keep empty
-                # buckets empty so origin and model group stay on the selected one.
-                **(
-                    MappingProxyType({"litellm_metadata": _billing_metadata(alternate_metadata, owner)})
-                    if alternate_metadata
-                    else _EMPTY_BILLING_FIELDS
-                ),
-                **(
-                    MappingProxyType({"proxy_server_request": _billing_request(params["proxy_server_request"])})
-                    if "proxy_server_request" in params
-                    else _EMPTY_BILLING_FIELDS
-                ),
-            }
-        )
-    )
-    projected_payload: Final = (
-        _BILLING_DICT.validate_python(
-            MappingProxyType(
-                {
-                    **payload,
-                    **(MappingProxyType({"user": owner.user_id}) if "user" in payload else _EMPTY_BILLING_FIELDS),
-                    **(MappingProxyType({"agent_id": None}) if "agent_id" in payload else _EMPTY_BILLING_FIELDS),
-                    "metadata": _billing_metadata(payload.get("metadata"), owner),
-                    "end_user": None,
-                    "request_tags": _BILLING_TAGS.validate_python(()),
-                    "request_model_access_groups": (),
+                "standard_logging_object": {
+                    **_billing_fields(payload, owner, reservation),
+                    **receipt_fields,
                 }
-            )
-        )
-        if payload is not None
-        else None
-    )
-    return _BILLING_DICT.validate_python(
-        MappingProxyType(
-            {
-                **kwargs,
-                "user": owner.user_id,
-                "agent_id": None,
-                "end_user": None,
-                "user_api_key_end_user_id": None,
-                "request_tags": _BILLING_TAGS.validate_python(()),
-                "request_model_access_groups": (),
-                **MappingProxyType(
-                    {
-                        key: _billing_metadata(kwargs[key], owner)
-                        for key in ("metadata", "litellm_metadata")
-                        if isinstance(kwargs.get(key), Mapping) and kwargs[key]
-                    }
-                ),
-                **(
-                    MappingProxyType({"proxy_server_request": _billing_request(kwargs["proxy_server_request"])})
-                    if "proxy_server_request" in kwargs
-                    else _EMPTY_BILLING_FIELDS
-                ),
-                "litellm_params": projected_params,
-                **(
-                    MappingProxyType({"standard_logging_object": projected_payload})
-                    if projected_payload is not None
-                    else _EMPTY_BILLING_FIELDS
-                ),
             }
-        )
-    )
+            if payload is not None
+            else {}
+        ),
+    }
 
 
 MODEL_ACCESS_GROUP_METADATA_KEY: Final = "user_api_key_matched_model_access_groups"

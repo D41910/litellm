@@ -204,12 +204,18 @@ class TestOpenMeterIntegration:
         assert data["data"]["model"] == "gpt-4"
 
     @pytest.mark.parametrize("evaluation", (False, True))
+    @pytest.mark.parametrize("trust_request_user", (False, True))
+    @pytest.mark.parametrize("charge_by", ("end_user_id", "user_id", "team_id"))
     @patch.dict(
         os.environ, LAGO_API_BASE="https://billing.test", LAGO_API_KEY="test",
-        LAGO_API_EVENT_CODE="eval", LAGO_API_CHARGE_BY="end_user_id",
+        LAGO_API_EVENT_CODE="eval",
     )
-    def test_cloudevents_structure(self, evaluation: bool) -> None:
+    def test_cloudevents_structure(
+        self, monkeypatch: pytest.MonkeyPatch, evaluation: bool, trust_request_user: bool, charge_by: str,
+    ) -> None:
         """Test that the CloudEvents structure is correct"""
+        monkeypatch.setenv("OPENMETER_TRUST_REQUEST_USER", str(trust_request_user).lower())
+        monkeypatch.setenv("LAGO_API_CHARGE_BY", charge_by)
         logger = OpenMeterLogger()
 
         kwargs = {
@@ -219,7 +225,7 @@ class TestOpenMeterIntegration:
             "response_cost": 0.001,
             "litellm_call_id": "cloudevents-test-call-id",
             "litellm_params": {
-                "metadata": {},
+                "metadata": {"user_api_key_user_id": "key-user", "user_api_key_team_id": "key-team"},
                 "proxy_server_request": {"body": {"user": "cloudevents-test-user"}},
             },
         }
@@ -239,7 +245,9 @@ class TestOpenMeterIntegration:
         assert result["source"] == "litellm-proxy"
         assert "time" in result
         assert isinstance(result["subject"], str)
-        assert result["subject"] == ("admin" if evaluation else "cloudevents-test-user")
+        assert result["subject"] == (
+            "admin" if evaluation else "cloudevents-test-user" if trust_request_user else "key-user"
+        )
 
         # Verify data structure
         assert "data" in result
@@ -248,7 +256,10 @@ class TestOpenMeterIntegration:
         assert result["data"]["prompt_tokens"] == 15
         assert result["data"]["completion_tokens"] == 8
         event: Final = LagoLogger()._common_logic(kwargs, response_obj)["event"]
-        assert event["external_subscription_id"] == result["subject"]
+        source_identity: Final = {
+            "end_user_id": "cloudevents-test-user", "user_id": "key-user", "team_id": "key-team",
+        }
+        assert event["external_subscription_id"] == ("admin" if evaluation else source_identity[charge_by])
         assert event["properties"]["response_cost"] == result["data"]["cost"]
         assert event["properties"]["total_tokens"] == response_obj.usage.total_tokens
         assert kwargs["user"] == "cloudevents-test-user"

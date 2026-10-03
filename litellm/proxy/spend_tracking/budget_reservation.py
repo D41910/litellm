@@ -246,7 +246,7 @@ def _is_unbilled_route(route: str) -> bool:
 
 
 async def reserve_budget_for_request(
-    request_body: dict,
+    request_body: dict[str, object],  # mutable-ok: existing reservation helpers accept dictionaries
     route: str,
     llm_router: Router | None,
     valid_token: UserAPIKeyAuth | None,
@@ -260,7 +260,7 @@ async def reserve_budget_for_request(
     apply_user_budget_to_team_keys: bool = False,
     fail_closed_budget_enforcement: bool = False,
     raw_body: bytes | None = None,
-) -> dict | None:
+) -> dict[str, object] | None:  # mutable-ok: shared reservation is finalized by the spend writer
     if valid_token is None or not RouteChecks.is_llm_api_route(route=route):
         return None
     if _is_unbilled_route(route):
@@ -332,7 +332,7 @@ async def reserve_budget_for_request(
         llm_router=llm_router,
         input_token_counts=input_token_counts,
     )
-    budget_reservation: Final = {
+    budget_reservation: Final[dict[str, object]] = {  # mutable-ok: shared finalization state
         "reserved_cost": reservation_cost,
         "entries": applied_entries,
         "finalized": False,
@@ -1297,7 +1297,7 @@ def _coerce_datetime(value: object) -> datetime | None:
 
 
 def estimate_request_max_cost(
-    request_body: dict,
+    request_body: dict[str, object],  # mutable-ok: existing cost helpers accept dictionaries
     route: str,
     llm_router: Router | None,
     input_token_counts: Mapping[str, int] | None = None,
@@ -1319,7 +1319,7 @@ def estimate_request_max_cost(
 
 
 def estimate_request_input_cost(
-    request_body: dict,
+    request_body: dict[str, object],  # mutable-ok: existing cost helpers accept dictionaries
     route: str,
     llm_router: Router | None,
     input_token_counts: Mapping[str, int] | None = None,

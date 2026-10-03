@@ -210,3 +210,17 @@ async def test_a_batch_polled_within_every_budget_window_is_never_charged_again(
     await _poll(limiter, finished, BATCH_COST)
 
     assert _local_spend(limiter, KEY_SPEND_KEY) == pytest.approx(BATCH_COST)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("end_user", (True, 7, ["forged"], {"user": "forged"}, None))
+async def test_invalid_optional_end_user_does_not_drop_authenticated_model_spend(end_user: object) -> None:
+    limiter: Final = _PROXY_VirtualKeyModelMaxBudgetLimiter(dual_cache=DualCache())
+    event: Final = _event("acompletion", CHAT_COST, team_budget=True)
+    payload: Final = event["standard_logging_object"]
+    assert isinstance(payload, dict)
+    await limiter.async_log_success_event(
+        {**event, "standard_logging_object": {**payload, "end_user": end_user}}, None, None, None,
+    )
+    assert await _spend(limiter, USER_SPEND_KEY) == pytest.approx(CHAT_COST)
+    assert await _spend(limiter, TEAM_SPEND_KEY) == pytest.approx(CHAT_COST)

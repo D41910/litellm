@@ -93,10 +93,14 @@ async def test_async_log_success_event(clean_env: None, evaluation: bool) -> Non
     """
     Test that logs are added to queue
     """
-    logger = DatadogCostManagementLogger(batch_size=10)
+    logger = DatadogCostManagementLogger(batch_size=10, cost_tag_keys=["billing_agent_id", "department"])
     payload: Final = StandardLoggingPayload(
         response_cost=0.01, total_tokens=5,
-        metadata={"user_api_key_user_id": "sampled-user", "user_api_key_alias": "sampled-key"},
+        metadata={
+            "user_api_key_user_id": "sampled-user", "user_api_key_alias": "sampled-key",
+            "user_api_key_team_id": "sampled-team", "billing_agent_id": "sampled-agent",
+        },
+        request_tags=["department:sampled"],
     )
 
     await logger.async_log_success_event(
@@ -116,6 +120,9 @@ async def test_async_log_success_event(clean_env: None, evaluation: bool) -> Non
     assert entry["BilledCost"] == 0.01
     assert entry["Tags"] is not None
     assert entry["Tags"]["user"] == ("admin" if evaluation else "sampled-key")
+    assert entry["Tags"].get("team") == (None if evaluation else "sampled-team")
+    assert entry["Tags"].get("billing_agent_id") == (None if evaluation else "sampled-agent")
+    assert entry["Tags"].get("department") == (None if evaluation else "sampled")
     assert payload["metadata"]["user_api_key_user_id"] == "sampled-user"
 
     # Test zero cost ignored

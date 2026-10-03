@@ -5,10 +5,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import Final
+from typing import Annotated, Final
 
 from openai.types import Batch
-from pydantic import TypeAdapter
+from pydantic import BeforeValidator, TypeAdapter
 from typing_extensions import ReadOnly, TypedDict
 
 import litellm
@@ -16,7 +16,11 @@ from litellm._logging import verbose_proxy_logger
 from litellm.caching.caching import DualCache
 from litellm.integrations.custom_logger import Span
 from litellm.litellm_core_utils.duration_parser import duration_in_seconds
-from litellm.litellm_core_utils.internal_call_metadata import project_evaluation_billing_kwargs
+from litellm.litellm_core_utils.internal_call_metadata import (
+    EVALUATION_BUDGET_RESERVATION_KEY,
+    get_evaluation_billing_owner_from_kwargs,
+    project_evaluation_billing_kwargs,
+)
 from litellm.llms.bedrock.common_utils import get_bedrock_base_model
 from litellm.proxy._types import Litellm_EntityType, UserAPIKeyAuth
 from litellm.router_strategy.budget_limiter import RouterBudgetLimiting
@@ -59,12 +63,16 @@ class _ModelBudgetLogIdentity(TypedDict, total=False):
     user_api_key_end_user_id: ReadOnly[str | None]
 
 
+def _optional_end_user(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 class _ModelBudgetLogPayload(TypedDict, total=False):
     model_group: ReadOnly[str | None]
     model: ReadOnly[str | None]
     response_cost: ReadOnly[float | None]
     metadata: ReadOnly[_ModelBudgetLogIdentity | None]
-    end_user: ReadOnly[str | None]
+    end_user: ReadOnly[Annotated[str | None, BeforeValidator(_optional_end_user)]]
 
 
 _MODEL_BUDGET_LOG_PAYLOAD: Final = TypeAdapter(_ModelBudgetLogPayload)
@@ -552,6 +560,13 @@ class _PROXY_VirtualKeyModelMaxBudgetLimiter(RouterBudgetLimiting):
         response_cost: Final = standard_logging_payload.get("response_cost", 0)
         if response_cost is None:
             return
+        if get_evaluation_billing_owner_from_kwargs(kwargs) is not None:
+            from litellm.proxy.spend_tracking.evaluation_budget import EvaluationBudgetReservation
+
+            reservation: Final = kwargs.get(EVALUATION_BUDGET_RESERVATION_KEY)
+            if isinstance(reservation, EvaluationBudgetReservation) and reservation.model is not None:
+                await reservation.model.settle(response_cost)
+                return
         key_model_max_budget: Final = _metadata.get("user_api_key_model_max_budget")
         entity_budgets: Final = (
             (
@@ -617,6 +632,25 @@ class _PROXY_VirtualKeyModelMaxBudgetLimiter(RouterBudgetLimiting):
             "current state of in memory cache %s",
             json.dumps(self.dual_cache.in_memory_cache.cache_dict, indent=4, default=str),
         )
+
+    async def async_log_failure_event(
+        self,
+        kwargs: Mapping[str, object],
+        response_obj: object,
+        start_time: datetime | None,
+        end_time: datetime | None,
+    ) -> None:
+        if get_evaluation_billing_owner_from_kwargs(kwargs) is None:
+            return
+        from litellm.proxy.spend_tracking.evaluation_budget import (
+            EvaluationBudgetReservation,
+            release_evaluation_budget,
+        )
+
+        reservation: Final = kwargs.get(EVALUATION_BUDGET_RESERVATION_KEY)
+        if isinstance(reservation, EvaluationBudgetReservation):
+            payload: Final = _MODEL_BUDGET_LOG_PAYLOAD.validate_python(kwargs.get("standard_logging_object") or kwargs)
+            await release_evaluation_budget(reservation, actual_cost=payload.get("response_cost") or 0.0)
 
     async def _charge_entity(
         self,

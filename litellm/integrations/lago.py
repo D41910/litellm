@@ -13,7 +13,6 @@ from litellm._uuid import uuid
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.internal_call_metadata import (
     get_evaluation_billing_owner_from_kwargs,
-    project_evaluation_billing_kwargs,
 )
 from litellm.llms.custom_httpx.http_handler import (
     HTTPHandler,
@@ -65,8 +64,7 @@ class LagoLogger(CustomLogger):
             raise Exception(f"Missing keys={missing_keys} in environment.")
 
     def _common_logic(self, kwargs: dict, response_obj) -> dict:
-        receipt: Final = project_evaluation_billing_kwargs(kwargs)
-        billing_owner: Final = get_evaluation_billing_owner_from_kwargs(receipt)
+        billing_owner: Final = get_evaluation_billing_owner_from_kwargs(kwargs)
         response_obj.get("id", kwargs.get("litellm_call_id"))
         get_utc_datetime().isoformat()
         cost: Final = kwargs.get("response_cost", None)

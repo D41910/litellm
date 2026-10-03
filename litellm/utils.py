@@ -45,7 +45,7 @@ from httpx import Proxy
 from httpx._utils import get_environment_proxies
 from openai.lib import _parsing, _pydantic
 from openai.types.chat.completion_create_params import ResponseFormat
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 import litellm
 import litellm.litellm_core_utils
@@ -1961,6 +1961,8 @@ def client(original_function):
 
     @wraps(original_function)
     async def wrapper_async(*args, **kwargs):
+        from litellm.litellm_core_utils.litellm_logging import Logging
+
         print_args_passed_to_litellm(original_function, args, kwargs)
         start_time: Final = datetime.datetime.now()
         result = None
@@ -2085,6 +2087,24 @@ def client(original_function):
                 and _caching_handler_response.embedding_uncached_input is not None
                 else kwargs
             )
+            if (
+                isinstance(logging_obj, Logging)
+                and logging_obj.evaluation_billing_owner is not None
+                and not _is_litellm_internal_call
+            ):
+                from litellm.litellm_core_utils.internal_call_metadata import EVALUATION_BUDGET_RESERVATION_KEY
+                from litellm.proxy.spend_tracking.evaluation_budget import reserve_evaluation_budget
+
+                logging_obj.evaluation_budget_reservation = await reserve_evaluation_budget(
+                    logging_obj.evaluation_billing_owner,
+                    TypeAdapter(dict[str, object]).validate_python(
+                        {**call_kwargs, "model": model, "messages": logging_obj.messages}
+                    ),
+                    TypeAdapter(str).validate_python(call_type),
+                )
+                logging_obj.model_call_details[EVALUATION_BUDGET_RESERVATION_KEY] = (
+                    logging_obj.evaluation_budget_reservation
+                )
             try:
                 result = await original_function(*args, **call_kwargs)
             except Exception as deployment_error:
@@ -2192,7 +2212,23 @@ def client(original_function):
             )
 
             return result
-        except Exception as e:
+        except BaseException as e:
+            if (
+                isinstance(logging_obj, Logging)
+                and logging_obj.evaluation_budget_reservation is not None
+                and not _is_litellm_internal_call
+            ):
+                from litellm.proxy.spend_tracking.evaluation_budget import release_evaluation_budget
+
+                await asyncio.shield(
+                    release_evaluation_budget(
+                        logging_obj.evaluation_budget_reservation,
+                        cancelled=isinstance(e, asyncio.CancelledError),
+                        actual_cost=logging_obj.recover_failure_cost(result),
+                    )
+                )
+            if not isinstance(e, Exception):
+                raise
             traceback_exception: Final = traceback.format_exc()
             # Reuse the timestamp taken right when the deployment call itself failed, before
             # the failure hook ran, so a slow callback doesn't inflate the reported duration.
@@ -2212,7 +2248,10 @@ def client(original_function):
 
             call_type = original_function.__name__
             num_retries, kwargs = _get_wrapper_num_retries(kwargs=kwargs, exception=e)
-            if call_type == CallTypes.acompletion.value:
+            sdk_retries_enabled: Final = (
+                not isinstance(logging_obj, Logging) or logging_obj.evaluation_billing_owner is None
+            )
+            if call_type == CallTypes.acompletion.value and sdk_retries_enabled:
                 context_window_fallback_dict: Final = kwargs.get("context_window_fallback_dict", {})
 
                 _is_litellm_router_call = "model_group" in (
@@ -2247,7 +2286,7 @@ def client(original_function):
                         kwargs["model"] = context_window_fallback_dict[model]
                     result = await original_function(*args, **kwargs)
                     return result
-            elif call_type == CallTypes.aresponses.value:
+            elif call_type == CallTypes.aresponses.value and sdk_retries_enabled:
                 _is_litellm_router_call = "model_group" in (
                     kwargs.get("metadata") or {}
                 )  # check if call from litellm.router/proxy
