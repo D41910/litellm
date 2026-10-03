@@ -1,4 +1,8 @@
 import os
+from pathlib import Path
+from typing import Final
+from unittest.mock import patch
+from importlib.resources import files
 
 
 import httpx
@@ -17,9 +21,9 @@ async def test_get_favicon_default():
     ) as ac:
         response = await ac.get("/get_favicon")
 
-    assert response.status_code in [200, 404]
-    if response.status_code == 200:
-        assert response.headers["content-type"] == "image/x-icon"
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/x-icon"
+    assert response.content == files("litellm_proxy_extras").joinpath("ui/favicon.ico").read_bytes()
 
 
 @pytest.mark.asyncio
@@ -50,3 +54,32 @@ async def test_get_favicon_remote_url_is_not_server_fetched(monkeypatch):
 
     assert response.status_code == 307
     assert response.headers["location"] == "https://invalid.com/favicon.ico"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid", (True, False))
+async def test_get_favicon_custom_file_or_packaged_fallback(
+    valid: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    custom: Final = tmp_path / "favicon.ico"
+    packaged: Final = files("litellm_proxy_extras").joinpath("ui/favicon.ico").read_bytes()
+    custom.write_bytes(packaged + b"custom" if valid else b"not an image")
+    monkeypatch.setenv("LITELLM_FAVICON_URL", str(custom))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        response: Final = await client.get("/get_favicon")
+    assert response.status_code == 200
+    assert response.content == (packaged + b"custom" if valid else packaged)
+    assert response.headers["content-type"] == "image/x-icon"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom", ("", "missing.ico"))
+async def test_missing_packaged_favicon_returns_not_found(
+    custom: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LITELLM_FAVICON_URL", custom)
+    with patch("litellm.proxy.proxy_server.package_files", return_value=tmp_path):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            response: Final = await client.get("/get_favicon")
+    assert response.status_code == 404
+    assert "favicon" in response.json()["detail"].lower()

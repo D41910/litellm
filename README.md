@@ -96,6 +96,8 @@ Install `litellm[cli]` for the `lite` and `litellm-proxy` client commands, or `l
 
 When upgrading, select the extras your application uses. An ordinary upgrade leaves previously installed dependencies in place; use a fresh environment or re-sync your environment to realize the smaller core installation
 
+Bedrock signing and AWS credential discovery require `litellm[aws]`; non-streaming Converse and Mantle bearer-token inference work without it. Bedrock binary event streaming still requires `[aws]` for its decoder. Without `litellm[tokenizers]`, automatic token counting for models that use Hugging Face tokenizers falls back to tiktoken with a warning. Local counts, estimated costs and token-limit decisions can change, so install that extra when you depend on the previous tokenizer behavior. Provider-reported usage is unaffected
+
 ```python
 from litellm import completion
 import os

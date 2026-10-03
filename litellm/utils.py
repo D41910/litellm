@@ -29,6 +29,7 @@ import textwrap
 import threading
 import time
 import traceback
+import warnings
 from dataclasses import dataclass, field
 from functools import lru_cache, wraps
 from importlib import resources
@@ -2401,6 +2402,13 @@ def _select_tokenizer_helper(model: str) -> SelectTokenizerResponse:
 
         if isinstance(e, (ForkedAfterNativeRuntimeStarted, ProcessReservedForForking)):
             raise
+        if isinstance(e.__cause__, ModuleNotFoundError) and e.__cause__.name == "tokenizers":
+            warnings.warn(
+                "Hugging Face tokenizers are unavailable; falling back to tiktoken. Local token counts, "
+                "cost estimates and token limits may differ. Install model-specific tokenizers with "
+                'pip install "litellm[tokenizers]".',
+                RuntimeWarning,
+            )
         verbose_logger.debug("Error selecting tokenizer: %s", e)
 
     # default - tiktoken

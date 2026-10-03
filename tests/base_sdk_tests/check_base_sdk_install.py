@@ -14,6 +14,7 @@ import os
 import sys
 import subprocess
 import traceback
+import warnings
 from collections.abc import Callable
 from functools import partial
 from importlib.metadata import distribution
@@ -106,6 +107,9 @@ def check_proxy_ui() -> str:
     if configured_path is not None:
         _require(root == Path(configured_path), "proxy ignored the configured UI directory")
     client: Final = TestClient(app)
+    favicon: Final = client.get("/get_favicon")
+    _require(favicon.status_code == 200, "default favicon is unavailable")
+    _require(favicon.content == files("litellm_proxy_extras").joinpath("ui/favicon.ico").read_bytes(), "wrong favicon")
     for route in ("", "login/"):
         response: Final = client.get(f"/ui/{route}")
         _require(response.status_code == 200, f"dashboard route {route!r} returned {response.status_code}")
@@ -308,7 +312,16 @@ def check_mantle_bearer_authentication() -> str:
     )
     _require(headers["Authorization"] == "Bearer supplied-bearer-token", "bearer token was not preserved")
     _require(body is not None and json.loads(body) == {"model": "example"}, "request body changed")
-    return "Mantle bearer authentication does not require AWS credentials"
+    from litellm.llms.bedrock.base_aws_llm import BaseAWSLLM
+
+    prepared: Final = BaseAWSLLM().get_request_headers(
+        credentials=None, aws_region_name="us-east-1", extra_headers=None,
+        endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com/model/example/converse",
+        data='{"text":"café"}', headers={"Content-Type": "application/json"}, api_key="supplied-bearer-token",
+    )
+    _require(prepared.headers["Authorization"] == "Bearer supplied-bearer-token", "Converse bearer token changed")
+    _require(prepared.body == '{"text":"café"}'.encode(), "Converse body encoding changed")
+    return "Mantle and Converse bearer authentication work without AWS credentials"
 
 
 def check_tokenizer_fallback() -> str:
@@ -319,14 +332,21 @@ def check_tokenizer_fallback() -> str:
         custom: Final = litellm.create_tokenizer(litellm.utils.claude_json_str)
         tokens: Final = litellm.encode(text="hello world", custom_tokenizer=custom)
         _require(litellm.decode(tokens=tokens, custom_tokenizer=custom) == "hello world", "tokenizer round trip failed")
-        return "custom Hugging Face tokenizer round-trips"
+        from litellm.litellm_core_utils.tokenizer import HuggingFace, Tokenizer
+        _require(isinstance(custom["tokenizer"], HuggingFace), "runtime HuggingFace alias is incompatible")
+        _require(isinstance(custom["tokenizer"], Tokenizer), "runtime Tokenizer alias is incompatible")
+        return "custom Hugging Face tokenizer round-trips and runtime aliases resolve"
     try:
         tokenizer._python_huggingface_tokenizer()
     except ImportError as error:
         _require("litellm[tokenizers]" in str(error), f"missing tokenizer installation guidance: {error}")
     else:
         raise AssertionError("Python Hugging Face tokenizer loaded without its extra")
-    _require(litellm.token_counter(model="claude-2", text="hello world") > 0, "token counting fallback failed")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default", RuntimeWarning)
+        for _ in range(2):
+            _require(litellm.token_counter(model="llama-3", text="hello world") > 0, "token counting fallback failed")
+    _require(len(caught) == 1 and "litellm[tokenizers]" in str(caught[0].message), "fallback must warn once")
     return "missing Python tokenizer explains installation and automatic counting falls back"
 
 

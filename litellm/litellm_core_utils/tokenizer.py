@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, UnionType
 from typing import TYPE_CHECKING, Final, Literal, Protocol, TypeAlias, runtime_checkable
 
 import tiktoken
@@ -373,6 +373,15 @@ Encoding: TypeAlias = tiktoken.Encoding | OpenAIEncoding
 if TYPE_CHECKING:
     HuggingFace: TypeAlias = PythonHuggingFaceTokenizer | HuggingFaceTokenizer
     Tokenizer: TypeAlias = Encoding | HuggingFace
+
+
+def __getattr__(name: str) -> UnionType:
+    if name not in ("HuggingFace", "Tokenizer"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from litellm.rust_bridge.tokenizer import _python_huggingface_tokenizer
+
+    huggingface: Final = _python_huggingface_tokenizer() | HuggingFaceTokenizer
+    return huggingface if name == "HuggingFace" else Encoding | huggingface
 
 
 class _AddedToken(Protocol):

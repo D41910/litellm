@@ -73,6 +73,7 @@ jobs:
               checker=("$GITHUB_WORKSPACE/scripts/check_mcp_sdk_install.py" --extra "$extra")
             fi
             (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.venv-$extra/bin/python" "${checker[@]}")
+            (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.venv-$extra/bin/python" "$GITHUB_WORKSPACE/tests/base_sdk_tests/check_sdk_http.py")
             if [ "$extra" = proxy ]; then
               (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.venv-$extra/bin/python" "$GITHUB_WORKSPACE/tests/base_sdk_tests/check_base_sdk_install.py" --profile proxy)
               (cd "$RUNNER_TEMP" && LITELLM_NON_ROOT=true LITELLM_UI_PATH="$RUNNER_TEMP/ui-$extra" "$GITHUB_WORKSPACE/.venv-$extra/bin/python" "$GITHUB_WORKSPACE/tests/base_sdk_tests/check_base_sdk_install.py" --profile proxy)
@@ -105,6 +106,7 @@ jobs:
               checker=("$GITHUB_WORKSPACE/scripts/check_mcp_sdk_install.py" --extra "$extra")
             fi
             (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.venv-lowest-$extra/bin/python" "${checker[@]}")
+            (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.venv-lowest-$extra/bin/python" "$GITHUB_WORKSPACE/tests/base_sdk_tests/check_sdk_http.py")
             if [ "$extra" = proxy ]; then
               (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/.venv-lowest-$extra/bin/python" "$GITHUB_WORKSPACE/tests/base_sdk_tests/check_base_sdk_install.py" --profile proxy)
               (cd "$RUNNER_TEMP" && LITELLM_NON_ROOT=true LITELLM_UI_PATH="$RUNNER_TEMP/ui-lowest-$extra" "$GITHUB_WORKSPACE/.venv-lowest-$extra/bin/python" "$GITHUB_WORKSPACE/tests/base_sdk_tests/check_base_sdk_install.py" --profile proxy)

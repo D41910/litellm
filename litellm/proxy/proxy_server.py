@@ -17681,8 +17681,7 @@ async def get_favicon():
         resolve_validated_local_image_path,
     )
 
-    current_dir: Final = os.path.dirname(os.path.abspath(__file__))
-    default_favicon: Final = os.path.join(current_dir, "_experimental", "out", "favicon.ico")
+    default_favicon: Final = str(package_files("litellm_proxy_extras").joinpath("ui", "favicon.ico"))
 
     favicon_url: Final = os.getenv("LITELLM_FAVICON_URL", "")
 

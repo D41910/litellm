@@ -8,6 +8,7 @@ import re
 import urllib.parse
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from importlib.util import find_spec
@@ -184,6 +185,14 @@ class BedrockRequestTarget(BaseModel):
 
 class Boto3CredentialsInfo(BedrockRequestTarget):
     credentials: Credentials
+
+
+@dataclass(frozen=True, slots=True)
+class BearerPreparedRequest:
+    method: str
+    url: str
+    headers: httpx.Headers
+    body: bytes
 
 
 class BearerRequestTarget(BedrockRequestTarget):
@@ -1578,16 +1587,22 @@ class BaseAWSLLM(SignsRequestsWithAWS):
         headers: dict,
         api_key: str | None = None,
         supports_bearer_token: bool = True,
-    ) -> AWSPreparedRequest:
+    ) -> AWSPreparedRequest | BearerPreparedRequest:
         aws_bearer_token: Final = bedrock_bearer_token(api_key) if supports_bearer_token else None
 
         if aws_bearer_token is not None:
-            try:
-                from botocore.awsrequest import AWSRequest
-            except ImportError:
-                raise ImportError("Missing boto3 to call bedrock. Run pip install 'litellm[aws]'.")
-            headers["Authorization"] = f"Bearer {aws_bearer_token}"
-            request = AWSRequest(method="POST", url=endpoint_url, data=data, headers=headers)
+            bearer_request: Final = httpx.Request(
+                "POST",
+                endpoint_url,
+                content=data,
+                headers={**headers, "Authorization": f"Bearer {aws_bearer_token}"},
+            )
+            return BearerPreparedRequest(
+                method=bearer_request.method,
+                url=str(bearer_request.url),
+                headers=bearer_request.headers,
+                body=bearer_request.content,
+            )
         else:
             try:
                 from botocore.auth import SigV4Auth

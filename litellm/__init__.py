@@ -521,6 +521,7 @@ priority_reservation: Optional[Dict[str, Union[float, "PriorityReservationDict"]
 # Only declare for type checking - at runtime __getattr__ handles it
 if TYPE_CHECKING:
     from .proxy.proxy_cli import run_server as run_server
+
     priority_reservation_settings: Optional["PriorityReservationSettings"] = None
 
 

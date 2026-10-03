@@ -59,7 +59,7 @@ def test_credential_discovery_missing_dependency_explains_extra(monkeypatch: pyt
         BaseAWSLLM().get_credentials(aws_access_key_id="key", aws_secret_access_key="secret")
 
 
-@pytest.mark.parametrize("api_key", (None, "supplied-token"))
+@pytest.mark.parametrize("api_key", (None,))
 def test_bedrock_request_preparation_missing_dependency_explains_extra(
     monkeypatch: pytest.MonkeyPatch, api_key: str | None
 ) -> None:
@@ -798,40 +798,15 @@ def test_sign_request_with_api_key_bearer_token():
     assert result_body == json.dumps(request_data).encode()
 
 
-def test_get_request_headers_with_env_var_bearer_token():
-    # Setup
-    llm = BaseAWSLLM()
-    credentials = Credentials("test_key", "test_secret", "test_token")
-    headers = {"Content-Type": "application/json"}
-    headers_dict = headers.copy()
-
-    # Create mock request
-    mock_prepared_request = MagicMock(spec=AWSPreparedRequest)
-    mock_request = MagicMock(spec=AWSRequest)
-    mock_request.headers = headers_dict
-    mock_request.prepare.return_value = mock_prepared_request
-
-    def mock_aws_request_init(method, url, data, headers):
-        mock_request.headers.update(headers)
-        return mock_request
-
-    # Test with bearer token
-    with (
-        patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": "test_token"}),
-        patch("botocore.awsrequest.AWSRequest", side_effect=mock_aws_request_init),
-    ):
-        result = llm.get_request_headers(
-            credentials=credentials,
-            aws_region_name="us-west-2",
-            extra_headers=None,
-            endpoint_url="https://api.example.com",
-            data='{"prompt": "test"}',
-            headers=headers_dict,
-        )
-
-        # Assert
-        assert mock_request.headers["Authorization"] == "Bearer test_token"
-        assert result == mock_prepared_request
+def test_get_request_headers_with_env_var_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "environment-token")
+    result: Final = BaseAWSLLM().get_request_headers(
+        credentials=None, aws_region_name="us-west-2", extra_headers=None,
+        endpoint_url="https://api.example.com", data='{"prompt":"test"}',
+        headers={"Content-Type": "application/json"}, api_key=None,
+    )
+    assert result.headers["Authorization"] == "Bearer environment-token"
+    assert result.body == b'{"prompt":"test"}'
 
 
 def test_get_request_headers_with_sigv4():
@@ -909,45 +884,15 @@ def test_sigv4_matches_rust_golden_vector():
     )
 
 
-def test_get_request_headers_with_api_key_bearer_token():
-    """
-    Test that get_request_headers uses the api_key parameter as a bearer token when provided
-    """
-    # Setup
-    llm = BaseAWSLLM()
-    credentials = Credentials("test_key", "test_secret", "test_token")
-    headers = {"Content-Type": "application/json"}
-    headers_dict = headers.copy()
-    api_key = "test_api_key"
-
-    # Create mock request
-    mock_prepared_request = MagicMock(spec=AWSPreparedRequest)
-    mock_request = MagicMock(spec=AWSRequest)
-    mock_request.headers = headers_dict
-    mock_request.prepare.return_value = mock_prepared_request
-
-    def mock_aws_request_init(method, url, data, headers):
-        mock_request.headers.update(headers)
-        return mock_request
-
-    # Test with api_key parameter
-    with (
-        patch.dict(os.environ, {}, clear=True),
-        patch("botocore.awsrequest.AWSRequest", side_effect=mock_aws_request_init),
-    ):
-        result = llm.get_request_headers(
-            credentials=credentials,
-            aws_region_name="us-west-2",
-            extra_headers=None,
-            endpoint_url="https://api.example.com",
-            data='{"prompt": "test"}',
-            headers=headers_dict,
-            api_key=api_key,
-        )
-
-        # Assert
-        assert mock_request.headers["Authorization"] == f"Bearer {api_key}"
-        assert result == mock_prepared_request
+def test_get_request_headers_with_api_key_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "environment-token")
+    result: Final = BaseAWSLLM().get_request_headers(
+        credentials=None, aws_region_name="us-west-2", extra_headers=None,
+        endpoint_url="https://api.example.com", data='{"prompt":"test"}',
+        headers={"Content-Type": "application/json"}, api_key="explicit-token",
+    )
+    assert result.headers["Authorization"] == "Bearer explicit-token"
+    assert result.body == b'{"prompt":"test"}'
 
 
 def test_role_assumption_without_session_name():
@@ -3753,3 +3698,18 @@ def test_resolve_credentials_forwards_profile_name():
 
     assert mock_session_cls.call_args.kwargs["profile_name"] == "litellm-qa-profile"
     assert credentials.access_key == "AKIAPROFILE"
+
+
+@pytest.mark.parametrize("body", ("{\"text\":\"café\"}", b"{}", b""))
+def test_bearer_request_preparation_without_botocore(body: str | bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "botocore.awsrequest", None)
+    request: Final = BaseAWSLLM().get_request_headers(
+        credentials=None, aws_region_name="us-east-1", extra_headers=None,
+        endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com/model/example/converse",
+        data=body, headers={"Content-Type": "application/json", "X-Custom": "preserved"}, api_key="supplied-token",
+    )
+    assert request.headers["Authorization"] == "Bearer supplied-token"
+    assert request.headers["X-Custom"] == "preserved"
+    assert request.method == "POST"
+    assert request.body == (body.encode("utf-8") if isinstance(body, str) else body)
+    assert int(request.headers["Content-Length"]) == len(request.body)
