@@ -1,9 +1,9 @@
 import os
+import sys
+from importlib.resources import files
 from pathlib import Path
 from typing import Final
 from unittest.mock import patch
-from importlib.resources import files
-
 
 import httpx
 import pytest
@@ -78,8 +78,31 @@ async def test_missing_packaged_favicon_returns_not_found(
     custom: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("LITELLM_FAVICON_URL", custom)
-    with patch("litellm.proxy.proxy_server.package_files", return_value=tmp_path):
+    with patch("litellm.proxy.common_utils.static_asset_utils.package_files", return_value=tmp_path):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
             response: Final = await client.get("/get_favicon")
     assert response.status_code == 404
     assert "favicon" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom", ("remote", "local", "missing"))
+async def test_custom_favicon_without_dashboard_package(
+    custom: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    favicon: Final = tmp_path / "custom.ico"
+    payload: Final = b"\x00\x00\x01\x00custom-icon"
+    favicon.write_bytes(payload)
+    url: Final = "https://example.com/custom.ico"
+    monkeypatch.setenv("LITELLM_FAVICON_URL", url if custom == "remote" else str(favicon) if custom == "local" else "")
+    monkeypatch.setitem(sys.modules, "litellm_proxy_extras", None)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        response: Final = await client.get("/get_favicon")
+    if custom == "remote":
+        assert response.status_code == 307
+        assert response.headers["location"] == url
+    elif custom == "local":
+        assert response.status_code == 200
+        assert response.content == payload
+    else:
+        assert response.status_code == 404

@@ -154,6 +154,7 @@ def test_proxy_serves_dashboard_from_extras_package() -> None:
     from litellm.proxy.proxy_server import app, packaged_ui_path
 
     expected: Final = files("litellm_proxy_extras").joinpath("ui")
+    assert packaged_ui_path is not None
     assert Path(packaged_ui_path) == Path(str(expected))
     client: Final = TestClient(app)
     response: Final = client.get("/ui/")

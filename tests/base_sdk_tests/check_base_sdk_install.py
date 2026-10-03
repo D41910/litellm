@@ -224,6 +224,11 @@ def check_proxy_ui() -> str:
                 asset_response.status_code == 200, f"dashboard asset {relative} returned {asset_response.status_code}"
             )
             _require(asset_response.content == asset.read_bytes(), f"wrong dashboard asset content for {relative}")
+    for case in ("ready", "unstructured", "empty", "unset"):
+        subprocess.run(
+            [sys.executable, "-I", str(Path(__file__).with_name("check_custom_ui.py")), case],
+            check=True,
+        )
     return "installed proxy serves dashboard, nested routes, JavaScript and CSS"
 
 
