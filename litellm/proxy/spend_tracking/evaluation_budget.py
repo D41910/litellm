@@ -216,7 +216,7 @@ async def reserve_evaluation_budget(
             if model_budget is not None
             else None
         )
-    except BaseException:
+    except (Exception, asyncio.CancelledError):
         await asyncio.shield(_RECONCILE(total, 0.0))
         raise
     input_cost: Final = (

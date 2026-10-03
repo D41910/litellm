@@ -2213,7 +2213,7 @@ def client(original_function):
             )
 
             return result
-        except BaseException as e:
+        except (Exception, asyncio.CancelledError) as e:
             if (
                 isinstance(logging_obj, Logging)
                 and isinstance(logging_obj.evaluation_billing_owner, EvaluationBillingOwner)
@@ -2229,7 +2229,7 @@ def client(original_function):
                         actual_cost=logging_obj.recover_failure_cost(result),
                     )
                 )
-            if not isinstance(e, Exception):
+            if isinstance(e, asyncio.CancelledError):
                 raise
             traceback_exception: Final = traceback.format_exc()
             # Reuse the timestamp taken right when the deployment call itself failed, before
