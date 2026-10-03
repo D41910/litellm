@@ -23,6 +23,32 @@ from fastapi import WebSocket, HTTPException, status
 from litellm.proxy._types import LiteLLM_UserTable, LitellmUserRoles
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("credential", ("llm_session_custom-token", "llm_srefresh_custom-token"))
+async def test_custom_auth_owns_credentials_with_delegated_prefixes(
+    monkeypatch: pytest.MonkeyPatch, credential: str
+) -> None:
+    from typing import Final
+
+    from fastapi import Request as HttpRequest
+
+    from litellm.proxy.auth.user_api_key_auth import _user_api_key_auth_builder
+
+    async def custom_auth(request: HttpRequest, api_key: str) -> UserAPIKeyAuth:
+        assert api_key == credential
+        return UserAPIKeyAuth(user_id="custom-user")
+
+    monkeypatch.setattr(litellm.proxy.proxy_server, "user_custom_auth", custom_auth)
+    monkeypatch.setattr(litellm.proxy.proxy_server, "general_settings", {})
+    monkeypatch.setattr(litellm, "enable_post_custom_auth_checks", False, raising=False)
+    request: Final = HttpRequest({"type": "http", "method": "GET", "path": "/key/info", "headers": []})
+    identity: Final = await _user_api_key_auth_builder(
+        request, f"Bearer {credential}", "", None, None, None, {}
+    )
+    assert identity.user_id == "custom-user"
+    assert identity.authenticated_by_custom_auth is True
+
+
 class Request:
     def __init__(self, client_ip: Optional[str] = None, headers: Optional[dict] = None):
         self.client = MagicMock()

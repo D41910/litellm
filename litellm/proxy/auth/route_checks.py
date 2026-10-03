@@ -15,6 +15,7 @@ from litellm.proxy._types import (
 )
 
 from .auth_checks_organization import _user_is_org_admin
+from .auth_utils import request_dispatched_to_pass_through_endpoint
 
 # Management write routes denied to PROXY_ADMIN_VIEW_ONLY. Adding a new write
 # endpoint to a management router REQUIRES adding it here too — the surrounding
@@ -68,6 +69,47 @@ _AUTH_ENFORCED_PASS_THROUGH_ROUTE_GROUPS: Final = frozenset(("openai_routes", "l
 
 
 class RouteChecks:
+    @staticmethod
+    def is_delegated_admin_route(route: str, request: Request) -> bool:
+        excluded: Final = (
+            *LiteLLMRoutes.master_key_only_routes.value,
+            *LiteLLMRoutes.mcp_routes.value,
+            *LiteLLMRoutes.passthrough_routes_wildcard.value,
+            "/jwt/*",
+            "/config/*",
+            "/get/config/*",
+            "/sso/*",
+            "/session/*",
+            "/user/auth",
+            "/user/password/*",
+            "/callbacks/*",
+            "/team/{team_id:path}/callback",
+            "/team/{team_id:path}/callback/{callback_name}",
+        )
+        allowed: Final = (
+            *LiteLLMRoutes.management_routes.value,
+            *LiteLLMRoutes.self_managed_routes.value,
+            *LiteLLMRoutes.org_admin_only_routes.value,
+            *LiteLLMRoutes.openai_routes.value,
+            *LiteLLMRoutes.anthropic_routes.value,
+            *LiteLLMRoutes.google_routes.value,
+            *LiteLLMRoutes.admin_viewer_routes.value,
+            *LiteLLMRoutes.global_spend_tracking_routes.value,
+            "/budget/new",
+            "/budget/update",
+            "/budget/delete",
+            "/budget/info",
+            "/organization/new",
+            "/organization/update",
+            "/organization/list",
+        )
+        return (
+            route.isprintable()
+            and not request_dispatched_to_pass_through_endpoint(request)
+            and not RouteChecks.check_route_access(route, excluded)
+            and RouteChecks.check_route_access(route, allowed)
+        )
+
     @staticmethod
     def should_call_route(
         route: str,
