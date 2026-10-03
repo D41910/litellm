@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
-from importlib.util import find_spec
 from threading import Lock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, ParamSpec, TypeVar, cast, get_args, overload
@@ -32,6 +31,7 @@ from litellm.constants import (
     BEDROCK_MAX_POLICY_SIZE,
     STS_CREDENTIAL_EXPIRY_SAFETY_MARGIN_SECONDS,
 )
+from litellm.litellm_core_utils.aws_dependencies import require_aws_sdk
 from litellm.litellm_core_utils.aws_partition import contains_bedrock_arn, get_aws_dns_suffix
 from litellm.litellm_core_utils.dd_tracing import tracer
 from litellm.secret_managers.main import get_secret, get_secret_str
@@ -371,8 +371,7 @@ class BaseAWSLLM(SignsRequestsWithAWS):
         """
         Return a boto3.Credentials object
         """
-        if find_spec("boto3") is None or find_spec("botocore") is None:
-            raise ImportError('Install AWS credential support with pip install "litellm[aws]"')
+        require_aws_sdk()
 
         # Only config-sourced credentials are expanded against the environment.
         # os.environ/<VAR> references in the model config are resolved at load time,

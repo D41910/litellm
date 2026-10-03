@@ -74,13 +74,107 @@ def check_cli(profile: str) -> str:
     for command, extra in (("litellm", "proxy"), ("lite", "cli"), ("litellm-proxy", "cli")):
         executable: Final = Path(sys.executable).parent / command
         result: Final = subprocess.run((str(executable), "--help"), capture_output=True, text=True, timeout=30)
-        if profile in ("cli", "proxy"):
+        if profile == "proxy" or (profile == "cli" and command != "litellm"):
             _require(result.returncode == 0, f"{command} failed: {result.stderr}")
             _require("Usage:" in result.stdout, f"{command} did not display help")
-        elif importlib.util.find_spec("click") is None:
+        else:
             _require(result.returncode != 0, f"{command} succeeded without CLI dependencies")
             _require(f"litellm[{extra}]" in result.stderr, f"{command} omitted installation guidance")
+            _require("Traceback" not in result.stderr, f"{command} printed a traceback")
     return "console commands preserve help or explain their required extra"
+
+
+def check_aws_signed_requests() -> str:
+    from botocore.credentials import Credentials
+    from litellm.llms.aws_polly.text_to_speech.transformation import AWSPollyTextToSpeechConfig
+    from litellm.llms.sagemaker.chat.handler import SagemakerChatHandler
+    from litellm.llms.sagemaker.completion.handler import SagemakerLLM
+
+    credentials: Final = Credentials("test-key", "test-secret", "test-session")
+    data: Final = {"inputs": "hello"}
+    prepared: Final = (
+        SagemakerChatHandler()._prepare_request(credentials, "test-endpoint", data, {}, "us-east-1"),
+        SagemakerLLM()._prepare_request(credentials, "test-endpoint", data, [], {}, {}, "us-east-1"),
+    )
+    for request in prepared:
+        _require(request.headers["Authorization"].startswith("AWS4-HMAC-SHA256"), "SageMaker request was not signed")
+        _require(json.loads(request.body) == data, "SageMaker signing changed the body")
+    headers, body = AWSPollyTextToSpeechConfig()._sign_polly_request(
+        {"Text": "hello", "VoiceId": "Joanna"},
+        "https://polly.us-east-1.amazonaws.com/v1/speech",
+        {"aws_access_key_id": "test-key", "aws_secret_access_key": "test-secret", "aws_region_name": "us-east-1"},
+    )
+    _require(headers["Authorization"].startswith("AWS4-HMAC-SHA256"), "Polly request was not signed")
+    _require(json.loads(body)["Text"] == "hello", "Polly signing changed the body")
+    return "installed AWS extra signs SageMaker and Polly requests"
+
+
+def check_aws_feature_guidance() -> str:
+    if importlib.util.find_spec("boto3") is not None:
+        return check_aws_signed_requests()
+    import litellm
+    from litellm.caching.s3_cache import S3Cache
+    from litellm.integrations.dynamodb import DyanmoDBLogger
+    from litellm.integrations.s3 import S3Logger
+    from litellm.integrations.s3_v2 import S3Logger as S3V2Logger
+    from litellm.integrations.sqs import SQSLogger
+    from litellm.litellm_core_utils.litellm_logging import _init_custom_logger_compatible_class
+    from litellm.llms.aws_polly.text_to_speech.transformation import AWSPollyTextToSpeechConfig
+    from litellm.llms.sagemaker.chat.handler import SagemakerChatHandler
+    from litellm.llms.sagemaker.completion.handler import SagemakerLLM
+    from litellm.secret_managers.aws_secret_manager_v2 import AWSSecretsManagerV2
+
+    cases: Final = (
+        ("S3 logger", S3Logger),
+        ("DynamoDB logger", DyanmoDBLogger),
+        ("S3 cache", partial(S3Cache, s3_bucket_name="test-bucket")),
+        ("Secrets Manager", partial(AWSSecretsManagerV2()._prepare_request, "GetSecretValue", "test-secret")),
+        ("S3 v2 constructor", S3V2Logger),
+        ("SQS constructor", SQSLogger),
+        ("S3 v2 registration", partial(_init_custom_logger_compatible_class, "s3_v2", None, None)),
+        ("SQS registration", partial(_init_custom_logger_compatible_class, "aws_sqs", None, None)),
+        ("SageMaker chat", partial(SagemakerChatHandler()._load_credentials, {})),
+        ("SageMaker completion", partial(SagemakerLLM()._load_credentials, {})),
+        ("Polly signing", partial(AWSPollyTextToSpeechConfig()._sign_polly_request, {}, "https://example.com", {})),
+    )
+    for label, action in cases:
+        try:
+            action()
+        except ImportError as error:
+            _require("litellm[aws]" in str(error), f"{label}: missing guidance: {error}")
+        else:
+            raise AssertionError(f"{label}: silently accepted missing AWS dependencies")
+    for callback in ("s3_v2", "aws_sqs"):
+        previous: Final = litellm.success_callback
+        try:
+            litellm.success_callback = [callback]
+            try:
+                litellm.completion(model="openai/test", messages=[{"role": "user", "content": "test"}], mock_response="ok")
+            except Exception as error:
+                _require("litellm[aws]" in str(error), f"{callback}: missing public guidance: {error}")
+            else:
+                raise AssertionError(f"{callback}: completion silently skipped logging")
+        finally:
+            litellm.success_callback = previous
+    common: Final = {"api_key": "", "aws_access_key_id": "test", "aws_secret_access_key": "test", "aws_region_name": "us-east-1", "num_retries": 0}
+    messages: Final = [{"role": "user", "content": "hello"}]
+    provider_calls: Final = (
+        partial(litellm.completion, model="bedrock/anthropic.claude-sonnet-5-5", messages=messages, **common),
+        partial(litellm.completion, model="bedrock/amazon.titan-text-express-v1", messages=messages, **common),
+        partial(litellm.embedding, model="bedrock/amazon.titan-embed-text-v2:0", input=["hello"], **common),
+        partial(litellm.image_generation, model="bedrock/amazon.nova-canvas-v1:0", prompt="tree", **common),
+        partial(litellm.rerank, model="bedrock/cohere.rerank-v3-5:0", query="hello", documents=["hello"], **common),
+        partial(litellm.completion, model="sagemaker/test-endpoint", messages=messages, **common),
+    )
+    for action in provider_calls:
+        try:
+            action()
+        except litellm.APIConnectionError as error:
+            _require("litellm[aws]" in str(error), "provider wrapper lost installation guidance")
+            _require(isinstance(error.__cause__ or error.__context__, ImportError), "provider wrapper lost the import failure")
+        else:
+            raise AssertionError("AWS provider unexpectedly succeeded without its extra")
+    return "AWS logging, cache, secrets, SageMaker and Polly explain the extra"
 
 
 def check_ui_packaging(profile: str) -> str:
@@ -386,6 +480,7 @@ def main() -> int:
         ("UI packaging", partial(check_ui_packaging, profile)),
         ("validation", partial(check_validation, profile)),
         ("CLI", partial(check_cli, profile)),
+        ("AWS feature guidance", check_aws_feature_guidance),
         *((("proxy UI", check_proxy_ui),) if profile == "proxy" else ()),
         *(
             check
