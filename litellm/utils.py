@@ -1961,6 +1961,7 @@ def client(original_function):
 
     @wraps(original_function)
     async def wrapper_async(*args, **kwargs):
+        from litellm.litellm_core_utils.internal_call_metadata import EvaluationBillingOwner
         from litellm.litellm_core_utils.litellm_logging import Logging
 
         print_args_passed_to_litellm(original_function, args, kwargs)
@@ -2089,7 +2090,7 @@ def client(original_function):
             )
             if (
                 isinstance(logging_obj, Logging)
-                and logging_obj.evaluation_billing_owner is not None
+                and isinstance(logging_obj.evaluation_billing_owner, EvaluationBillingOwner)
                 and not _is_litellm_internal_call
             ):
                 from litellm.litellm_core_utils.internal_call_metadata import EVALUATION_BUDGET_RESERVATION_KEY
@@ -2215,6 +2216,7 @@ def client(original_function):
         except BaseException as e:
             if (
                 isinstance(logging_obj, Logging)
+                and isinstance(logging_obj.evaluation_billing_owner, EvaluationBillingOwner)
                 and logging_obj.evaluation_budget_reservation is not None
                 and not _is_litellm_internal_call
             ):
@@ -2248,8 +2250,8 @@ def client(original_function):
 
             call_type = original_function.__name__
             num_retries, kwargs = _get_wrapper_num_retries(kwargs=kwargs, exception=e)
-            sdk_retries_enabled: Final = (
-                not isinstance(logging_obj, Logging) or logging_obj.evaluation_billing_owner is None
+            sdk_retries_enabled: Final = not isinstance(logging_obj, Logging) or not isinstance(
+                logging_obj.evaluation_billing_owner, EvaluationBillingOwner
             )
             if call_type == CallTypes.acompletion.value and sdk_retries_enabled:
                 context_window_fallback_dict: Final = kwargs.get("context_window_fallback_dict", {})
