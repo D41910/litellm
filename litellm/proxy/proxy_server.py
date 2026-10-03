@@ -778,6 +778,9 @@ from litellm.proxy.shutdown.scheduled_jobs import (
     pause_scheduled_jobs,
     stop_in_flight_scheduler_jobs,
 )
+from litellm.proxy.spend_tracking.background_interaction_settlement import (
+    install_background_interaction_settlement,
+)
 from litellm.proxy.spend_tracking.budget_reservation import (
     get_budget_window_start,
     release_unbound_budget_reservation,
@@ -1395,6 +1398,7 @@ async def proxy_startup_event(app: FastAPI) -> AsyncGenerator[ProxyLifespanState
                     await asyncio.sleep(5)
 
         asyncio.create_task(_run_agent_grant_id_migration())
+        await install_background_interaction_settlement(prisma_client)
 
     ## A coordination_redis block saved from the admin UI lives in the database,
     ## which is only reachable once the prisma client exists. Apply it here, before
@@ -9008,11 +9012,15 @@ class ProxyConfig:
 
         from litellm.proxy.search_endpoints.search_tool_registry import (
             SearchToolRegistry,
+            keep_loaded_search_tools_that_do_not_decrypt,
         )
         from litellm.router_utils.search_api_router import SearchAPIRouter
 
         try:
-            db_search_tools: Final = await SearchToolRegistry.get_all_search_tools_from_db(prisma_client=prisma_client)
+            db_search_tools: Final = keep_loaded_search_tools_that_do_not_decrypt(
+                await SearchToolRegistry.get_all_search_tools_from_db(prisma_client=prisma_client),
+                loaded_search_tools=llm_router.search_tools if llm_router is not None else (),
+            )
 
             parsed_tools: Final = self.parse_search_tools(self.get_config_state())
             config_search_tools: Final = parsed_tools or []
@@ -12267,6 +12275,8 @@ async def completion(
         )
         litellm_call_id: Final = request_litellm_call_id(data)
         log_llm_api_exception(e, litellm_call_id)
+        if isinstance(e, ProxyException):
+            raise with_litellm_call_id(e, litellm_call_id)
         error_msg: Final = f"{e}"
         raise ProxyException(
             message=getattr(e, "message", error_msg),

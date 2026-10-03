@@ -1936,6 +1936,23 @@ export interface paths {
         patch: operations["bedrock_proxy_route_bedrock__endpoint__patch"];
         trace?: never;
     };
+    "/bespoke/v1/systemone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bespoke Proxy Route */
+        post: operations["bespoke_proxy_route_bespoke_v1_systemone_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/budget/delete": {
         parameters: {
             query?: never;
@@ -25824,6 +25841,13 @@ export interface components {
             /** Url */
             url: string;
         };
+        /** AgentTestCase */
+        AgentTestCase: {
+            /** Expected */
+            expected: string;
+            /** Input */
+            input: string;
+        };
         /**
          * AlertType
          * @description Enum for alert types and management event types
@@ -31913,6 +31937,7 @@ export interface components {
         };
         /** Finding */
         Finding: {
+            brief?: components["schemas"]["IssueBrief"] | null;
             /** Check Id */
             check_id: string;
             /** Description */
@@ -31978,6 +32003,7 @@ export interface components {
         };
         /** FindingDraft */
         FindingDraft: {
+            brief?: components["schemas"]["IssueBrief"] | null;
             /** Check Id */
             check_id: string;
             /** Description */
@@ -33161,6 +33187,17 @@ export interface components {
             invitation_id: string;
             /** Is Accepted */
             is_accepted: boolean;
+        };
+        /** IssueBrief */
+        IssueBrief: {
+            /** Problem */
+            problem: string;
+            /** Test Cases */
+            test_cases: components["schemas"]["AgentTestCase"][];
+            /** User Goal */
+            user_goal: string;
+            /** What Happened */
+            what_happened: string;
         };
         /**
          * ItemReference
@@ -39149,12 +39186,12 @@ export interface components {
         OpenSourceClassifierConfig: {
             /**
              * Api Base
-             * @description Provider API base; defaults to TYPESAFE_API_BASE or LAYA_API_BASE for the selected provider
+             * @description Provider API base; defaults to the selected provider API_BASE environment variable
              */
             api_base?: string | null;
             /**
              * Api Key
-             * @description Provider API key; optional for self-hosted Laya
+             * @description Provider API key; optional for self-hosted providers
              */
             api_key?: string | null;
             /**
@@ -39169,7 +39206,7 @@ export interface components {
             circuit_breaker_enabled: boolean;
             /**
              * Instructions
-             * @description Replaces the built-in Jev question instructions
+             * @description Replaces the built-in classification instructions
              */
             instructions?: string | null;
             /**
@@ -39182,7 +39219,7 @@ export interface components {
              * @default jev
              * @enum {string}
              */
-            provider: "jev" | "laya";
+            provider: "jev" | "laya" | "bespoke";
             /**
              * Timeout Ms
              * @default 3000
@@ -41213,6 +41250,67 @@ export interface components {
                 };
             } | null;
         };
+        /** ROIBranchAttribution */
+        ROIBranchAttribution: {
+            /** Branch */
+            branch: string;
+            /** Repo */
+            repo: string;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests: number;
+            /** Spend */
+            spend?: number | null;
+            /**
+             * Status
+             * @default unattributed
+             * @enum {string}
+             */
+            status: "matched" | "unattributed" | "ambiguous" | "unavailable";
+        };
+        /** ROIBranchMetrics */
+        ROIBranchMetrics: {
+            /** Cost Per Hour */
+            cost_per_hour?: number | null;
+            /**
+             * Hours
+             * @default 0
+             */
+            hours: number;
+            /**
+             * Matched Pulls
+             * @default 0
+             */
+            matched_pulls: number;
+            /**
+             * Spend
+             * @default 0
+             */
+            spend: number;
+            /**
+             * Total Tagged Spend
+             * @default 0
+             */
+            total_tagged_spend: number;
+            /**
+             * Unlinked Spend
+             * @default 0
+             */
+            unlinked_spend: number;
+        };
+        /** ROIBranchSpend */
+        ROIBranchSpend: {
+            /** Branch */
+            branch: string;
+            /** Repo */
+            repo: string;
+            /** Requests */
+            requests: number;
+            /** Spend */
+            spend: number;
+        };
         /** ROIEstimateResponse */
         ROIEstimateResponse: {
             /**
@@ -41309,6 +41407,7 @@ export interface components {
         ROIPullResponse: {
             /** Additions */
             additions: number;
+            branch_cost?: components["schemas"]["ROIBranchAttribution"];
             /** Cache Key */
             cache_key?: string | null;
             /** Changed Files */
@@ -41340,6 +41439,16 @@ export interface components {
             profile_email: string;
             /** Repo */
             repo: string;
+            /**
+             * Source Branch
+             * @default
+             */
+            source_branch: string;
+            /**
+             * Source Repo
+             * @default
+             */
+            source_repo: string;
             /** Title */
             title: string;
             /** Url */
@@ -41381,10 +41490,20 @@ export interface components {
             estimator_prompt: string;
             /** Github Api Url */
             github_api_url: string;
+            /**
+             * Gitlab Api Url
+             * @default https://gitlab.com/api/v4
+             */
+            gitlab_api_url: string;
             /** Has Estimator Key */
             has_estimator_key: boolean;
             /** Has Github Token */
             has_github_token: boolean;
+            /**
+             * Has Gitlab Token
+             * @default false
+             */
+            has_gitlab_token: boolean;
             /** Identity Map */
             identity_map: {
                 [key: string]: string;
@@ -41393,6 +41512,12 @@ export interface components {
             ready: boolean;
             /** Repos */
             repos: string[];
+            /**
+             * Source Provider
+             * @default github
+             * @enum {string}
+             */
+            source_provider: "github" | "gitlab";
             /** Update Interval Minutes */
             update_interval_minutes: number;
         };
@@ -41410,13 +41535,20 @@ export interface components {
             github_api_url?: string | null;
             /** Github Token */
             github_token?: string | null;
+            /** Gitlab Api Url */
+            gitlab_api_url?: string | null;
+            /** Gitlab Token */
+            gitlab_token?: string | null;
             /** Repos */
             repos?: string[] | null;
+            /** Source Provider */
+            source_provider?: ("github" | "gitlab") | null;
             /** Update Interval Minutes */
             update_interval_minutes?: number | null;
         };
         /** ROISummaryResponse */
         ROISummaryResponse: {
+            branch_metrics?: components["schemas"]["ROIBranchMetrics"];
             /** Effort Basis */
             effort_basis: string | null;
             /** End */
@@ -41436,12 +41568,23 @@ export interface components {
             pulls: components["schemas"]["ROIPullResponse"][];
             /** Repos */
             repos: string[];
+            /**
+             * Source Provider
+             * @default github
+             * @enum {string}
+             */
+            source_provider: "github" | "gitlab";
             /** Start */
             start: string;
             /** Synced At */
             synced_at: string;
             /** Trend */
             trend: components["schemas"]["ROITrendResponse"][];
+            /**
+             * Unlinked Branches
+             * @default []
+             */
+            unlinked_branches: components["schemas"]["ROIBranchSpend"][];
             /** Warnings */
             warnings: string[];
         };
@@ -41989,7 +42132,7 @@ export interface components {
             classifier_plugin_timeout_ms: number;
             /**
              * Classifier Type
-             * @description Classification strategy: local regex/keyword scoring, the bundled trained four-tier heuristic, an LLM tier-selection call, a Switchyard-compatible capability forecast, a joint Fuse V2 forecast, a custom classifier plugin, 'heuristic_first', which scores locally and only pays for the LLM classifier when the local scorer does not confidently land a cheap tier, or 'hybrid', which trusts the local scorer everywhere except when its score lands near a tier boundary, or 'oss_classifier', a structured choice call using Jev or Laya
+             * @description Classification strategy: local regex/keyword scoring, the bundled trained four-tier heuristic, an LLM tier-selection call, a Switchyard-compatible capability forecast, a joint Fuse V2 forecast, a custom classifier plugin, 'heuristic_first', which scores locally and only pays for the LLM classifier when the local scorer does not confidently land a cheap tier, or 'hybrid', which trusts the local scorer everywhere except when its score lands near a tier boundary, or 'oss_classifier', a structured choice call using Jev, Laya or Bespoke Nimble
              * @default heuristic
              * @enum {string}
              */
@@ -44995,6 +45138,8 @@ export interface components {
             error: string | null;
             /** Error Truncated */
             error_truncated: boolean;
+            /** Framework */
+            framework: string;
             /** Input Preview */
             input_preview: string;
             /** Input Tokens */
@@ -46893,10 +47038,177 @@ export interface components {
              */
             truncated: boolean;
         };
+        /** TraceQueryAttributeField */
+        TraceQueryAttributeField: {
+            /** Expression */
+            expression: string;
+            /** Key */
+            key: string;
+            /**
+             * Type
+             * @constant
+             */
+            type: "String";
+        };
+        /** TraceQueryAttributes */
+        TraceQueryAttributes: {
+            /** Column */
+            column: string;
+            /** Discovery Sql */
+            discovery_sql: string;
+            /** Error */
+            error?: string | null;
+            /** Fields */
+            fields: components["schemas"]["TraceQueryAttributeField"][];
+            /** Scope */
+            scope: string;
+            /**
+             * Table
+             * @enum {string}
+             */
+            table: "otel_traces" | "agent_traces_by_key" | "spend_logs";
+            /** Truncated */
+            truncated: boolean;
+        };
+        /** TraceQueryColumn */
+        TraceQueryColumn: {
+            /** Name */
+            name: string;
+            /** Type */
+            type: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TraceQueryExample */
+        TraceQueryExample: {
+            /** Name */
+            name: string;
+            /** Sql */
+            sql: string;
+        };
+        /** TraceQueryHelp */
+        TraceQueryHelp: {
+            /** Access */
+            access: string;
+            /** Attributes */
+            attributes: components["schemas"]["TraceQueryAttributes"][];
+            /** Dialect */
+            dialect: string;
+            /** Examples */
+            examples: components["schemas"]["TraceQueryExample"][];
+            /** Gotchas */
+            gotchas: string[];
+            /** Guide */
+            guide: string;
+            metadata: components["schemas"]["TraceQueryMetadata"];
+            /** Normalized Fields */
+            normalized_fields: components["schemas"]["TraceQueryNormalizedField"][];
+            /** Relationships */
+            relationships: components["schemas"]["TraceQueryRelationship"][];
+            /** Response */
+            response: string;
+            /** Tables */
+            tables: components["schemas"]["TraceQueryTable"][];
+        };
+        /** TraceQueryMetadata */
+        TraceQueryMetadata: {
+            /** Column */
+            column: string;
+            /** Error */
+            error?: string | null;
+            /** Fields */
+            fields: components["schemas"]["TraceQueryMetadataField"][];
+            /** Invalid Json Rows */
+            invalid_json_rows: number;
+            /** Sample Sql */
+            sample_sql: string;
+            /** Sampled Rows */
+            sampled_rows: number;
+            /** Scope */
+            scope: string;
+            /**
+             * Table
+             * @enum {string}
+             */
+            table: "otel_traces" | "agent_traces_by_key" | "spend_logs";
+            /** Truncated */
+            truncated: boolean;
+        };
+        /** TraceQueryMetadataField */
+        TraceQueryMetadataField: {
+            /** Expression */
+            expression: string;
+            /** Path */
+            path: (string | number)[];
+            /** Types */
+            types: ("array" | "boolean" | "integer" | "null" | "number" | "object" | "string")[];
+        };
+        /** TraceQueryNormalizedField */
+        TraceQueryNormalizedField: {
+            /** Column */
+            column: string;
+            /** Meaning */
+            meaning: string;
+            /** Name */
+            name: string;
+            /**
+             * Table
+             * @enum {string}
+             */
+            table: "otel_traces" | "agent_traces_by_key" | "spend_logs";
+            /** Type */
+            type: string;
+        };
+        /** TraceQueryRelationship */
+        TraceQueryRelationship: {
+            /** Additional Predicates */
+            additional_predicates: string;
+            /** Left */
+            left: string;
+            /** Meaning */
+            meaning: string;
+            /** Right */
+            right: string;
+        };
         /** TraceQueryRequest */
         TraceQueryRequest: {
             /** Sql */
             sql: string;
+        };
+        /** TraceQueryStatistics */
+        TraceQueryStatistics: {
+            /** Bytes Read */
+            bytes_read: number | string;
+            /** Elapsed */
+            elapsed: number;
+            /** Rows Read */
+            rows_read: number | string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TraceQueryTable */
+        TraceQueryTable: {
+            /** Columns */
+            columns: components["schemas"]["TraceQueryColumn"][];
+            /**
+             * Name
+             * @enum {string}
+             */
+            name: "otel_traces" | "agent_traces_by_key" | "spend_logs";
+        };
+        /** TraceSQLResponse */
+        TraceSQLResponse: {
+            /** Data */
+            data: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+            /** Meta */
+            meta: components["schemas"]["TraceQueryColumn"][];
+            /** Rows */
+            rows: number | string;
+            statistics: components["schemas"]["TraceQueryStatistics"];
+        } & {
+            [key: string]: unknown;
         };
         /** TraceSummary */
         TraceSummary: {
@@ -46910,6 +47222,8 @@ export interface components {
             duration_ms: number;
             /** Error Count */
             error_count: number;
+            /** Frameworks */
+            frameworks?: string[];
             /** Input Preview */
             input_preview: string;
             /** Input Tokens */
@@ -52858,6 +53172,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bespoke_proxy_route_bespoke_v1_systemone_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };
@@ -79779,7 +80113,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TraceSQLResponse"];
                 };
             };
             /** @description Validation Error */
@@ -79808,7 +80142,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TraceQueryHelp"];
                 };
             };
         };

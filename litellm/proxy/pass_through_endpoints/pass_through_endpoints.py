@@ -65,7 +65,7 @@ from litellm.llms.base_llm.managed_resources.utils import (
     resolve_passthrough_managed_id_provider,
 )
 from litellm.llms.custom_httpx.http_handler import get_async_httpx_client
-from litellm.llms.laya.common_utils import validate_laya_request
+from litellm.llms.oss_decision import validate_oss_request
 from litellm.passthrough import BasePassthroughUtils
 from litellm.proxy._types import (
     ConfigFieldInfo,
@@ -387,7 +387,9 @@ class HttpPassThroughEndpointHelpers(BasePassthroughUtils):
     @staticmethod
     def get_endpoint_type(url: str, custom_llm_provider: str | None = None) -> EndpointType:
         parsed_url: Final = urlparse(url)
-        if custom_llm_provider == "typesafe" and parsed_url.path.removesuffix("/").endswith("/v1/systemone"):
+        if custom_llm_provider in ("typesafe", "laya", "bespoke") and parsed_url.path.removesuffix("/").endswith(
+            "/v1/systemone"
+        ):
             return EndpointType.DECISIONS
         if (
             ("generateContent") in url
@@ -619,11 +621,11 @@ class HttpPassThroughEndpointHelpers(BasePassthroughUtils):
 
         litellm_metadata: Final = litellm_keys_in_body.get("litellm_metadata")
         metadata: Final = litellm_keys_in_body.get("metadata")
-        if litellm_metadata:
-            _metadata.update(litellm_metadata)
-        if metadata:
-            _metadata.update(metadata)
+        for client_metadata in (litellm_metadata, metadata):
+            if isinstance(client_metadata, dict):
+                _metadata.update({k: v for k, v in client_metadata.items() if not k.startswith("user_api_key_")})
 
+        _metadata = _apply_key_team_project_controls(user_api_key_dict=user_api_key_dict, metadata=_metadata)
         _metadata = _update_metadata_with_tags_in_header(
             request=request,
             metadata=_metadata,
@@ -1163,10 +1165,10 @@ async def pass_through_request(
             pricing_body: Final = TypeAdapter(dict[str, object]).validate_python(_parsed_body)
             _strip_client_pricing_overrides(pricing_body)
             _parsed_body = pricing_body
-        if custom_llm_provider == "laya":
-            laya_request: Final = TypeAdapter(Mapping[str, object]).validate_python(_parsed_body)
-            checkpoint: Final = validate_laya_request(laya_request)
-            _parsed_body["model"] = f"laya/{checkpoint}"
+        if custom_llm_provider in ("laya", "bespoke"):
+            decision_request: Final = TypeAdapter(Mapping[str, object]).validate_python(_parsed_body)
+            checkpoint: Final = validate_oss_request(custom_llm_provider, decision_request)
+            _parsed_body["model"] = f"{custom_llm_provider}/{checkpoint}"
 
         ### COLLECT GUARDRAILS FOR PASSTHROUGH ENDPOINT ###
         # Passthrough endpoints are opt-in only for guardrails
@@ -1223,17 +1225,19 @@ async def pass_through_request(
             call_type="pass_through_endpoint",
             endpoint_type=endpoint_type,
         )
-        if custom_llm_provider == "laya":
+        if custom_llm_provider in ("laya", "bespoke"):
             hook_body: Final = TypeAdapter(dict[str, object]).validate_python(_parsed_body)
             hook_model: Final = hook_body.get("model")
-            laya_body: Final = MappingProxyType(
+            decision_body: Final = MappingProxyType(
                 {
                     **hook_body,
-                    "model": hook_model.removeprefix("laya/") if isinstance(hook_model, str) else hook_model,
+                    "model": hook_model.removeprefix(f"{custom_llm_provider}/")
+                    if isinstance(hook_model, str)
+                    else hook_model,
                 }
             )
-            _ = validate_laya_request(laya_body)
-            _parsed_body = TypeAdapter(dict[str, object]).validate_python(laya_body)
+            _ = validate_oss_request(custom_llm_provider, decision_body)
+            _parsed_body = TypeAdapter(dict[str, object]).validate_python(decision_body)
         resolved_timeout: Final = resolve_pass_through_request_timeout(timeout)
         async_client_obj: Final = get_async_httpx_client(
             llm_provider=httpxSpecialProvider.PassThroughEndpoint,
@@ -1934,6 +1938,20 @@ async def pass_through_request(
             )
 
 
+def _apply_key_team_project_controls(
+    user_api_key_dict: UserAPIKeyAuth, metadata: dict[str, object]
+) -> dict[str, object]:
+    data: Final = LiteLLMProxyRequestSetup.add_key_level_controls(
+        key_metadata=user_api_key_dict.metadata,
+        data={"metadata": metadata},
+        _metadata_variable_name="metadata",
+    )
+    return LiteLLMProxyRequestSetup.add_team_and_project_level_controls(
+        user_api_key_dict=user_api_key_dict,
+        metadata=data["metadata"],
+    )
+
+
 def _update_metadata_with_tags_in_header(request: Request, metadata: dict) -> dict:
     """
     If tags are in the request headers, add them to the metadata
@@ -1954,9 +1972,10 @@ def _update_metadata_with_tags_in_header(request: Request, metadata: dict) -> di
 
     # Only add tags key if there are tags to add
     if tags_to_add:
-        if "tags" not in metadata:
-            metadata["tags"] = []
-        metadata["tags"].extend(tags_to_add)
+        metadata["tags"] = LiteLLMProxyRequestSetup._merge_tags(
+            request_tags=metadata.get("tags"),
+            tags_to_add=tags_to_add,
+        )
 
     return metadata
 
