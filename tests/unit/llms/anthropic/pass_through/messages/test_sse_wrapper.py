@@ -1,6 +1,4 @@
 import pytest
-from fastapi.testclient import TestClient
-
 
 from litellm.llms.anthropic.pass_through.adapters.streaming_iterator import (
     AnthropicStreamWrapper,
@@ -120,3 +118,61 @@ async def test_async_anthropic_sse_wrapper():
     chunk_str = first_chunk.decode("utf-8")
     assert "event: message_start" in chunk_str
     assert '"type": "message_start"' in chunk_str
+
+
+class _MockLoggingObj:
+    """Stand-in for LiteLLMLoggingObj covering the mid-stream failure surface."""
+
+    def __init__(self):
+        self.failure_handler_calls = []
+
+    def record_streamed_anthropic_message_id(self, message_id):
+        pass
+
+    def failure_handler(self, exception, traceback_exception, **kwargs):
+        self.failure_handler_calls.append(exception)
+
+
+class _SyncFailingCompletionStream:
+    """Sync stream that emits one content chunk, then the provider dies."""
+
+    def __init__(self):
+        self.responses = [
+            ModelResponseStream(
+                choices=[StreamingChoices(delta=Delta(content="Hello"), index=0, finish_reason=None)],
+            ),
+        ]
+        self.index = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.index < len(self.responses):
+            response = self.responses[self.index]
+            self.index += 1
+            return response
+        raise Exception("Server disconnected")
+
+
+def test_sync_sse_wrapper_mid_stream_error_emits_frame_and_runs_failure_handler():
+    """The sync SDK path has no proxy boundary downstream: a mid-stream provider error must
+    produce a client-facing Anthropic error frame and run the failure handler, instead of
+    silently ending the stream with neither an error frame nor message_stop (#44742 sync sibling)."""
+    logging_obj = _MockLoggingObj()
+    wrapper = AnthropicStreamWrapper(
+        completion_stream=_SyncFailingCompletionStream(),
+        model="claude-3",
+        litellm_logging_obj=logging_obj,
+    )
+
+    received = [chunk for chunk in wrapper.anthropic_sse_wrapper()]
+
+    assert any(b"message_start" in chunk for chunk in received)
+    # The stream must not pretend it completed: no message_stop after the failure.
+    assert not any(b'"message_stop"' in chunk for chunk in received)
+    error_frames = [chunk for chunk in received if b"event: error" in chunk]
+    assert len(error_frames) == 1
+    assert b"Server disconnected" in error_frames[0]
+    assert len(logging_obj.failure_handler_calls) == 1
+    assert "Server disconnected" in str(logging_obj.failure_handler_calls[0])

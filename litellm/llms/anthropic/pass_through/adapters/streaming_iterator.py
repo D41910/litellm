@@ -335,6 +335,9 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         self._message_id: str = f"msg_{uuid.uuid4()}"
         if litellm_logging_obj is not None:
             litellm_logging_obj.record_streamed_anthropic_message_id(self._message_id)
+        # Kept so the sync mid-stream error path can run the logging object's failure
+        # handler when the stream is consumed standalone (no proxy boundary downstream).
+        self.litellm_logging_obj = litellm_logging_obj
         # Mapping of truncated tool names to original names (for OpenAI's 64-char limit)
         self.tool_name_mapping = tool_name_mapping or {}
         # Polyfill applied_edits on final message_delta.
@@ -778,7 +781,23 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
             raise StopIteration
         except Exception as e:
             verbose_logger.error("Anthropic Adapter - %s\n%s", e, traceback.format_exc())
-            raise StopIteration
+            # Standalone (sync SDK) consumption has no proxy boundary downstream, so run the
+            # logging object's failure handler here; anthropic_sse_wrapper converts the
+            # re-raised error into a client-facing Anthropic error frame. Swallowing the
+            # exception into StopIteration instead would end the stream with neither an
+            # error frame nor message_stop, and without any failure logging.
+            if self.litellm_logging_obj is not None:
+                try:
+                    self.litellm_logging_obj.failure_handler(
+                        exception=e,
+                        traceback_exception=traceback.format_exc(),
+                    )
+                except Exception as failure_handler_error:
+                    verbose_logger.exception(
+                        "Anthropic Adapter - failure handler raised while reporting a mid-stream error: %s",
+                        failure_handler_error,
+                    )
+            raise
 
     async def __anext__(self):
         from .transformation import LiteLLMAnthropicMessagesAdapter
@@ -1016,15 +1035,23 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         Similar to the Bedrock bedrock_sse_wrapper implementation.
 
         This wrapper ensures dict chunks are SSE formatted with both event and data lines.
+
+        Mid-stream failures reach this generator (the sync ``__next__`` re-raises them after
+        running the logging object's failure handler); standalone sync consumers get a
+        client-facing Anthropic error frame and no further events, instead of a silently
+        truncated stream.
         """
-        for chunk in self:
-            if isinstance(chunk, dict):
-                event_type: str = str(chunk.get("type", "message"))
-                payload = f"event: {event_type}\ndata: {json.dumps(chunk)}\n\n"
-                yield payload.encode()
-            else:
-                # For non-dict chunks, forward the original value unchanged
-                yield chunk
+        try:
+            for chunk in self:
+                if isinstance(chunk, dict):
+                    event_type: str = str(chunk.get("type", "message"))
+                    payload = f"event: {event_type}\ndata: {json.dumps(chunk)}\n\n"
+                    yield payload.encode()
+                else:
+                    # For non-dict chunks, forward the original value unchanged
+                    yield chunk
+        except Exception as e:  # noqa: BLE001  # boundary before the socket: any upstream failure becomes an Anthropic error event
+            yield _mid_stream_error_sse_event(e)
 
     async def async_anthropic_sse_wrapper(self) -> AsyncIterator[bytes]:
         """
