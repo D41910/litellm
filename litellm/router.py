@@ -66,6 +66,7 @@ from litellm.constants import (
     DEFAULT_HEALTH_CHECK_STALENESS_MULTIPLIER,
     DEFAULT_MAX_LRU_CACHE_SIZE,
     INTERNAL_CALL_ORIGIN_METADATA_KEY,
+    MAX_CALLBACKS,
     OUTPUT_TOKEN_CEILING_PARAMS,
     ROUTER_USAGE_COUNTED_TOKENS_METADATA_KEY,
     ROUTING_REQUEST_TAGS_METADATA_KEY,
@@ -1511,7 +1512,14 @@ class Router:
             else:
                 litellm.input_callback = [selector]
         if isinstance(litellm.callbacks, list):
-            litellm.logging_callback_manager.add_litellm_callback(selector)
+            # Selectors are per-router stateful instances, so the callback
+            # manager's same-class dedup must not apply here: it would drop a
+            # second Router's selector (or the one rebuilt by
+            # `update_settings(routing_strategy_args=...)`) whenever any
+            # instance of the class is already registered, leaving that router
+            # with no latency/usage learning. Dedup by identity instead.
+            if selector not in litellm.callbacks and len(litellm.callbacks) < MAX_CALLBACKS:
+                litellm.callbacks.append(selector)
 
     def _unregister_router_selectors(self, selectors: Sequence[object]) -> None:
         """

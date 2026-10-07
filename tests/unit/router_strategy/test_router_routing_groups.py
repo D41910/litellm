@@ -519,6 +519,54 @@ def test_two_routers_in_one_process_each_count_their_own_requests(monkeypatch):
     assert second.cache.get_cache("filtered-model_request_count:deploy-1") == 0
 
 
+def test_second_router_latency_selector_stays_registered(monkeypatch):
+    """
+    Strategy selectors are per-router stateful instances, so a second Router in
+    one process (an SDK app recreating its router, the proxy's DB config flow
+    building a replacement) must register its own selector even though the
+    callback manager's same-class dedup sees an instance of the class already.
+    A dropped second selector never records latency, so its
+    `{model_group}_map` cache stays empty and latency-based routing on that
+    router behaves as if no latency data exists. Reported in #44575.
+    """
+    monkeypatch.setattr(litellm, "callbacks", [])
+    monkeypatch.setattr(litellm, "input_callback", [])
+
+    first = _build_router(routing_strategy="latency-based-routing")
+    second = _build_router(routing_strategy="latency-based-routing")
+
+    assert first.lowestlatency_logger is not None
+    assert second.lowestlatency_logger is not None
+    assert second.lowestlatency_logger is not first.lowestlatency_logger
+    assert first.lowestlatency_logger in litellm.callbacks
+    assert second.lowestlatency_logger in litellm.callbacks
+
+
+def test_update_routing_strategy_args_keeps_default_selector_registered(monkeypatch):
+    """
+    `update_settings(routing_strategy_args=...)` rebuilds the default group's
+    selector while the previous instance is still registered. Same-class dedup
+    dropped the rebuild, and unregistering the previous instance then left
+    `litellm.callbacks` with no latency selector at all — latency learning
+    died on the live router.
+    """
+    monkeypatch.setattr(litellm, "callbacks", [])
+    monkeypatch.setattr(litellm, "input_callback", [])
+
+    router = _build_router(routing_strategy="latency-based-routing")
+    initial = router.lowestlatency_logger
+    assert initial is not None
+    assert initial in litellm.callbacks
+
+    router.update_settings(routing_strategy_args={"ttl": 300})
+
+    rebuilt = router.lowestlatency_logger
+    assert rebuilt is not None
+    assert rebuilt is not initial
+    assert rebuilt in litellm.callbacks
+    assert all(c is not initial for c in litellm.callbacks)
+
+
 # ---------------------------------------------------------------------------
 # Direct helper coverage
 # ---------------------------------------------------------------------------
